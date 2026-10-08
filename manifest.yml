@@ -1,0 +1,140 @@
+modules:
+  rovo:mcp:
+    - key: jira-automation-rule-tools
+      name: Jira Automation Rule Tools
+      tools:
+        - draft-automation-rule
+        - revise-automation-rule-draft
+        - create-approved-automation-rule
+        - get-component-reference
+  action:
+    - key: draft-automation-rule
+      name: Draft automation rule for approval
+      function: draft-rule-function
+      actionVerb: CREATE
+      description: >-
+        Drafts a Jira automation rule and raises an approval ticket. Does NOT
+        create the rule; after approval, create-approved-automation-rule does.
+        Relay the returned message as-is and never say a rule was created.
+      inputs:
+        ruleSpec:
+          title: Rule specification
+          type: string
+          required: true
+          description: |
+            JSON extracted from the user's prompt or attached document. For
+            GSOC-Demo, projectId must be 10449. Use name, projectId, trigger,
+            conditions, and actions. For the issue-created trigger, include the
+            UI-captured events array as trigger.events. The action assembles
+            the API payload and always disables the created rule. Numeric float
+            custom fields can be set using a finite number, a Jira smart value,
+            or a smart-value math expression in actions[].value.fields. The
+            fields value may be an array of { name or fieldId, value } entries
+            or an object mapping field names or IDs to values. Prefer stable
+            field IDs when known. The action safely adds the
+            Jira {{#=}} math wrapper when needed; never add a unit suffix such
+            as "minutes". In GSOC-Demo, Response Time is
+            customfield_11639 (number/float) and Time to first response is
+            customfield_10049 (SLA). To convert the SLA's elapsed milliseconds
+            to decimal minutes, use a Jira math expression dividing by 60000.
+        requestSummary:
+          title: Request summary
+          type: string
+          required: false
+          description: |
+            One or two plain sentences describing what the user asked for.
+            Shown on the approval ticket, labelled as the agent's summary.
+    - key: revise-automation-rule-draft
+      name: Revise automation rule draft
+      function: revise-draft-function
+      actionVerb: UPDATE
+      description: >-
+        Replaces the draft on an approval ticket in Changes Requested with a
+        corrected ruleSpec based on the manager's comments, then resubmits it.
+        Does NOT create the rule.
+      inputs:
+        issueKey:
+          title: Approval ticket key
+          type: string
+          required: true
+          description: |
+            Key of the approval ticket to revise, e.g. AUTOAPR-12.
+        ruleSpec:
+          title: Revised rule specification
+          type: string
+          required: true
+          description: |
+            The complete revised ruleSpec JSON, in the same format as for
+            draft-automation-rule (not a diff). For GSOC-Demo, projectId must
+            be 10449.
+    - key: create-approved-automation-rule
+      name: Create approved automation rule
+      function: create-approved-fn
+      actionVerb: CREATE
+      description: >-
+        Creates the stored draft rule of an APPROVED approval ticket, DISABLED.
+        Only the ticket key is accepted; the rule cannot be changed here. Call
+        only after approval. Relay the returned message or summary as-is.
+      inputs:
+        issueKey:
+          title: Approval ticket key
+          type: string
+          required: true
+          description: |
+            Key of the approved approval ticket, e.g. AUTOAPR-12. The app
+            checks the ticket is Approved by an approver before creating.
+    - key: get-component-reference
+      name: Get component reference
+      function: component-ref-fn
+      actionVerb: GET
+      description: >-
+        Returns the verified value-object shape for a Jira automation trigger, condition, action or structural type. No shape here means it is a guess. Call with no arguments first for an index of supported types.
+      inputs:
+        componentType:
+          title: Component type
+          type: string
+          required: false
+          description: |
+            Exact type key, e.g. jira.issue.edit, jira.jql.scheduled,
+            jira.comparator.condition. Returns that type's full shape. Omit
+            for an index of everything supported.
+        kind:
+          title: Component kind
+          type: string
+          required: false
+          description: |
+            One of trigger, action, condition, structural. Returns every shape
+            of that kind. Ignored when componentType is set.
+        smartValues:
+          title: Smart values
+          type: string
+          required: false
+          description: |
+            Set to "true" to return the verified smart-value expressions
+            (math-block syntax, JSM SLA duration fields) instead of component
+            shapes.
+
+  function:
+    - key: draft-rule-function
+      handler: drafts.draftAutomationRule
+    - key: revise-draft-function
+      handler: drafts.reviseAutomationRuleDraft
+    - key: create-approved-fn
+      handler: create-approved.createApprovedAutomationRule
+    - key: component-ref-fn
+      handler: component-reference.getComponentReference
+
+permissions:
+  external:
+    fetch:
+      backend:
+        - address: https://api.atlassian.com
+  scopes:
+    - read:jira-work # read approval ticket status and changelog
+    - write:jira-work # create approval ticket, comment, attach draft, resubmit transition
+    - storage:app # Forge KVS: frozen drafts and creation claims
+
+app:
+  id: ari:cloud:ecosystem::app/f528b627-6df6-432b-b881-231b1ee6461f
+  runtime:
+    name: nodejs22.x

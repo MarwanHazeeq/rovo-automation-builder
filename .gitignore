@@ -1,0 +1,11 @@
+/node_modules/
+/dist/
+/.vscode/
+.idea
+/sample-jira-auto-rules
+/.forge/
+/.vs/
+
+# Local secrets and scratch
+.env
+/.claude/worktrees/
