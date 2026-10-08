@@ -5,7 +5,7 @@
 **The agent drafts, a human approves, the agent creates exactly what was approved.**
 A Rovo `rovo:mcp` tool server with four actions:
 - `draft-automation-rule` turns a small `ruleSpec` into a full Automation API payload,
-  validates it, raises an approval ticket (AUTOAPR project), freezes the payload in Forge KVS
+  validates it, raises an approval ticket (in SOC), freezes the payload in Forge KVS
   and attaches a redacted copy to the ticket.
 - `revise-automation-rule-draft` replaces the draft after the manager picks Request Changes.
 - `create-approved-automation-rule` takes ONLY an issue key. Once the ticket is Approved by an
@@ -13,9 +13,9 @@ A Rovo `rovo:mcp` tool server with four actions:
   **DISABLED**, GETs it back to verify, and comments the result.
 - `get-component-reference` serves the verified component shapes so the agent stops inventing them.
 
-Teams notification and the headless revise/create calls are Jira automation rules on AUTOAPR
+Teams notification and the headless revise/create calls are Jira automation rules on SOC
 ("Use Rovo agent"), not app code. No UI; one egress host (`api.atlassian.com`). Target site
-project: GSOC-Demo, `projectId` 10449. Design: `docs/ideas/approval-gated-drafting.md`,
+project: SOCAIAutomation (key `SOC`, `projectId` 10086), which also holds the approval tickets. Design: `docs/ideas/approval-gated-drafting.md`,
 decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CONTEXT.md`.
 
 ## Commands
@@ -87,6 +87,8 @@ the caller nothing: creation is authorised by the ticket's changelog, not by who
 - `avi:jira:transitioned:issue` does not exist. A trigger built on it silently never fires.
 - Adding a scope or egress entry needs redeploy **and then** reinstall.
 - Rovo action `description` is capped at 255 characters (`forge lint` catches it).
+- The ticket's assignee is only who is notified. Never read it in the approval check;
+  `create-approved` authorises from the changelog author + `APPROVER_ACCOUNT_IDS`.
 - Approval tickets use status/transition **IDs** from Forge variables (see README), never names.
 - Forge `requestJira` bodies are `string | ArrayBuffer | URLSearchParams` only (no `FormData`),
   so `addAttachment` builds the multipart body by hand. Jira needs `X-Atlassian-Token: no-check`.

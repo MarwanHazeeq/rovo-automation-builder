@@ -23,7 +23,7 @@ modules:
           required: true
           description: |
             JSON extracted from the user's prompt or attached document. For
-            GSOC-Demo, projectId must be 10449. Use name, projectId, trigger,
+            SOCAIAutomation (SOC), projectId must be 10086. Use name, projectId, trigger,
             conditions, and actions. For the issue-created trigger, include the
             UI-captured events array as trigger.events. The action assembles
             the API payload and always disables the created rule. Numeric float
@@ -33,7 +33,7 @@ modules:
             or an object mapping field names or IDs to values. Prefer stable
             field IDs when known. The action safely adds the
             Jira {{#=}} math wrapper when needed; never add a unit suffix such
-            as "minutes". In GSOC-Demo, Response Time is
+            as "minutes". On this site, Response Time is
             customfield_11639 (number/float) and Time to first response is
             customfield_10049 (SLA). To convert the SLA's elapsed milliseconds
             to decimal minutes, use a Jira math expression dividing by 60000.
@@ -44,6 +44,14 @@ modules:
           description: |
             One or two plain sentences describing what the user asked for.
             Shown on the approval ticket, labelled as the agent's summary.
+        approverAccountId:
+          title: Approver account ID
+          type: string
+          required: false
+          description: |
+            Atlassian account ID of the user's approver, found with Jira user
+            search. The ticket is assigned to them. Must be an allowed
+            approver, or no ticket is raised.
     - key: revise-automation-rule-draft
       name: Revise automation rule draft
       function: revise-draft-function
@@ -58,15 +66,15 @@ modules:
           type: string
           required: true
           description: |
-            Key of the approval ticket to revise, e.g. AUTOAPR-12.
+            Key of the approval ticket to revise, e.g. SOC-12.
         ruleSpec:
           title: Revised rule specification
           type: string
           required: true
           description: |
             The complete revised ruleSpec JSON, in the same format as for
-            draft-automation-rule (not a diff). For GSOC-Demo, projectId must
-            be 10449.
+            draft-automation-rule (not a diff). For SOCAIAutomation (SOC), projectId
+            must be 10086.
     - key: create-approved-automation-rule
       name: Create approved automation rule
       function: create-approved-fn
@@ -81,7 +89,7 @@ modules:
           type: string
           required: true
           description: |
-            Key of the approved approval ticket, e.g. AUTOAPR-12. The app
+            Key of the approved approval ticket, e.g. SOC-12. The app
             checks the ticket is Approved by an approver before creating.
     - key: get-component-reference
       name: Get component reference

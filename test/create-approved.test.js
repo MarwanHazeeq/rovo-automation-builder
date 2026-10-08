@@ -187,6 +187,16 @@ test('an approver outside APPROVER_ACCOUNT_IDS creates nothing and is recorded',
   assert.match(adfText(ctx.jira.calls.addComment[0].body), /Rule NOT created/);
 });
 
+test('being the assignee grants nothing: an allowlisted assignee does not excuse an unlisted approver', async () => {
+  const issue = liveIssue();
+  issue.fields.assignee = { accountId: 'manager-1' };
+  const ctx = await setup({ issue, changelog: [statusChange(APPROVED, { author: 'someone-else' })] });
+  const result = await ctx.run();
+
+  assert.equal(result.ok, false);
+  assert.equal(ctx.createCalls.length, 0);
+});
+
 test('an approval with no author fails closed', async () => {
   const ctx = await setup({ changelog: [statusChange(APPROVED, { author: null })] });
   const result = await ctx.run();

@@ -13,7 +13,7 @@
  */
 
 const REQUIRED = [
-  'APPROVAL_PROJECT_KEY', //       e.g. AUTOAPR - the project approval tickets live in
+  'APPROVAL_PROJECT_KEY', //       e.g. SOC - the project approval tickets live in
   'APPROVAL_ISSUE_TYPE_ID', //     issue type used for approval tickets
   'APPROVED_STATUS_ID',
   'CHANGES_REQUESTED_STATUS_ID',

@@ -14,6 +14,10 @@ _Avoid_: user, author, submitter
 A person allowed to approve an Approval ticket, listed by account ID in the app's configuration.
 _Avoid_: manager (a role, not a permission), reviewer
 
+**Assignee**:
+The Approver the Approval ticket was sent to, so that they are notified. It grants nothing: only an Approver on the allowlist moving the ticket to Approved (per its changelog) authorises creation.
+_Avoid_: owner, approver (when you mean the assignee)
+
 **Self-approval**:
 An approval where the Requester and the Approver are the same person. It is allowed, and recorded on the ticket.
 

@@ -42,7 +42,7 @@ pasting JSON) can be swapped in later without touching the approval path.
 
 - [ ] **"Use Rovo agent" exists on this site's plan and can call this app's
       actions headlessly.** *Test:* spike S7. Fallback: the user tells Rovo
-      "revise AUTOAPR-n" or "create AUTOAPR-n".
+      "revise SOC-n" or "create SOC-n".
 - [ ] **The ticket changelog names the approver and the target status ID.**
       *Test:* spike S9. Without the author, every approval fails closed.
 - [ ] **Jira accepts the hand-built multipart attachment.** *Test:* spike S9.
@@ -57,7 +57,7 @@ pasting JSON) can be swapped in later without touching the approval path.
 **In:** `draft-automation-rule`, `revise-automation-rule-draft` and
 `create-approved-automation-rule` actions; frozen drafts plus an atomic
 creation claim in Forge KVS; code-rendered ticket comments and redacted draft
-attachments; the AUTOAPR project, workflow and three Jira automation rules
+attachments; the SOC rule-request issue type, workflow and three Jira automation rules
 (notify, revise, create), set up by hand.
 
 **Out:** everything in "Not Doing".

@@ -109,6 +109,49 @@ test('a failed upload still submits the draft, with a warning and an honest comm
   assert.match(adfText(jira.calls.addComment[0].body), /could not be attached/);
 });
 
+// --- approver routing (assignee) -------------------------------------------
+
+test('an allowlisted approver is assigned on the create call and recorded', async () => {
+  const { store, jira, actions } = setup();
+  const result = await actions.draftAutomationRule({ ruleSpec: '{}', approverAccountId: ' manager-1 ' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.assignedTo, 'manager-1');
+  assert.match(result.message, /assigned to approver manager-1/);
+  assert.deepEqual(jira.calls.createIssue[0].assignee, { accountId: 'manager-1' });
+  assert.equal((await store.getDraft('20001')).approverAccountId, 'manager-1');
+  assert.ok(JSON.stringify(jira.calls.addComment[0].body).includes('"mention"'));
+});
+
+test('an approver outside APPROVER_ACCOUNT_IDS raises no ticket and does not leak the list', async () => {
+  const { jira, actions } = setup();
+  const result = await actions.draftAutomationRule({ ruleSpec: '{}', approverAccountId: 'someone-else' });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.ruleCreated, false);
+  assert.equal(result.draftSubmitted, false);
+  assert.match(result.error, /not an allowed approver/);
+  assert.doesNotMatch(result.error, /manager-1|me-1/);
+  assert.equal(jira.calls.createIssue.length, 0);
+});
+
+test('with one configured approver and none given, that approver is assigned', async () => {
+  const { jira, actions } = setup({ env: { ...APPROVAL_ENV, APPROVER_ACCOUNT_IDS: 'manager-1' } });
+  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  assert.equal(result.assignedTo, 'manager-1');
+  assert.deepEqual(jira.calls.createIssue[0].assignee, { accountId: 'manager-1' });
+});
+
+test('with several configured approvers and none given, the ticket is left unassigned and says so', async () => {
+  const { jira, actions } = setup();
+  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  assert.equal(result.ok, true);
+  assert.equal(result.assignedTo, null);
+  assert.equal('assignee' in jira.calls.createIssue[0], false);
+  assert.match(result.message, /unassigned/);
+  assert.match(adfText(jira.calls.addComment[0].body), /unassigned/);
+});
+
 // --- revise -----------------------------------------------------------------
 
 function liveIssue(statusId, projectKey = 'AUTOAPR') {

@@ -28,14 +28,21 @@ export function createDraftActions({
   return {
     /**
      * Rovo action `draft-automation-rule`.
-     * Inputs: `ruleSpec` (JSON string, same contract as before) and an
+     * Inputs: `ruleSpec` (JSON string, same contract as before), an
      * optional `requestSummary` (the agent's plain-language description,
-     * shown on the ticket and clearly labelled as the agent's words).
+     * shown on the ticket and clearly labelled as the agent's words) and an
+     * optional `approverAccountId` (who the ticket is assigned to).
      */
     async draftAutomationRule(payload, invocationContext) {
       const configResult = readApprovalConfig(getEnv());
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
+
+      // 0. Decide who the ticket is assigned to, BEFORE anything is created,
+      //    so a bad approver never leaves a half-made ticket behind.
+      const routing = chooseApprover(payload?.approverAccountId, config.approverAccountIds);
+      if (!routing.ok) return draftFailure(routing.error);
+      const approverAccountId = routing.accountId;
 
       // 1. Build and validate. Nothing is created; the only network call is
       //    the read-only field-metadata lookup.
@@ -50,6 +57,9 @@ export function createDraftActions({
           issuetype: { id: config.issueTypeId },
           summary: truncate(`Automation rule request: ${prepared.rule.name}`, 250),
           description: describeRequest(payload?.requestSummary),
+          // Set in the same request (not a separate assign call afterwards)
+          // so the Teams "Issue created" rule already sees the assignee.
+          ...(approverAccountId ? { assignee: { accountId: approverAccountId } } : {}),
         });
       } catch (error) {
         return draftFailure(`The approval ticket could not be created: ${error.message}`);
@@ -72,6 +82,9 @@ export function createDraftActions({
         // create action falls back to the ticket's reporter.
         requesterAccountId:
           invocationContext?.principal?.accountId ?? payload?.context?.accountId ?? null,
+        // Audit only: who the ticket was sent to. Nothing reads this to decide
+        // anything; the create action checks Jira's changelog instead.
+        approverAccountId,
         history: [],
       };
       record.history.push({ version: 1, digest: record.digest, state: record.state, at: new Date().toISOString() });
@@ -101,10 +114,14 @@ export function createDraftActions({
         issueKey: issue.key,
         version: 1,
         digest: record.digest,
+        assignedTo: approverAccountId,
         ...(warning ? { warning } : {}),
         // Rendered by code. The agent should relay this, not paraphrase it.
         message:
-          `Draft v1 of "${rule.name}" was submitted for approval as ${issue.key}. ` +
+          `Draft v1 of "${rule.name}" was submitted for approval as ${issue.key}` +
+          (approverAccountId
+            ? ` and assigned to approver ${approverAccountId}. `
+            : ', unassigned: assign it to an approver so they are notified. ') +
           'No automation rule has been created. It can be created, DISABLED, only after ' +
           `${issue.key} is approved.`,
       };
@@ -244,6 +261,33 @@ async function postDraftArtifacts(jira, issueKey, record) {
   return warnings.length
     ? `The draft was stored, but on ${issueKey} ${warnings.join(' and ')}.`
     : null;
+}
+
+/**
+ * Who to assign the approval ticket to.
+ *
+ * The agent finds the manager's account ID with Rovo's Jira user search, so
+ * the value is the agent's word: it is accepted only if it is on
+ * APPROVER_ACCOUNT_IDS. With no value and exactly one approver configured,
+ * that approver is used; with several, the ticket is left unassigned rather
+ * than guessing. Being the assignee grants nothing: the create action
+ * authorises from the changelog, not from this.
+ */
+function chooseApprover(requested, approverAccountIds) {
+  const accountId = typeof requested === 'string' ? requested.trim() : '';
+  if (accountId === '') {
+    return { ok: true, accountId: approverAccountIds.length === 1 ? approverAccountIds[0] : null };
+  }
+  if (!approverAccountIds.includes(accountId)) {
+    // Deliberately does not list the allowed IDs back to the agent.
+    return {
+      ok: false,
+      error:
+        `Account ${accountId} is not an allowed approver, so no approval ticket was raised. ` +
+        'Ask the user to confirm their approver, or ask a Jira admin to add them to APPROVER_ACCOUNT_IDS.',
+    };
+  }
+  return { ok: true, accountId };
 }
 
 /** Ticket description: the agent's summary, labelled as such. */

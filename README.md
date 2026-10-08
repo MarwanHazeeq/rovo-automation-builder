@@ -82,8 +82,18 @@ with real values; do not commit them to this repository.
 
 These steps are done once, by a Jira admin, in the Jira UI.
 
-1. **Project.** Create a company-managed project for approvals, for example key
-   `AUTOAPR`, with one issue type for rule requests.
+1. **Project.** Approval tickets live in **SOCAIAutomation** (key `SOC`, id 10086),
+   the same project the created rules are scoped to. Add a dedicated issue type
+   for rule requests (for example "Automation Request") so that:
+   - approvals get their own workflow and SOC's incident workflow is untouched;
+   - the Jira automation rules below can be limited to that issue type;
+   - approved rules can exclude it (issue type ≠ Automation Request), so a rule
+     that fires on SOC issues does not also fire on approval tickets.
+
+   Put the **Assignee** field on that issue type's create screen, and give
+   requesters the **Assign Issues** permission in SOC: the app assigns the
+   ticket to the approver when it raises it, and Jira rejects the whole create
+   request otherwise. The assignee is who gets notified, not who may approve.
 2. **Workflow.** Give that issue type this workflow:
 
    | From | Transition | To | Who |
@@ -96,21 +106,22 @@ These steps are done once, by a Jira admin, in the Jira UI.
 
    Approved and Rejected are final. Add a comment field to the Request Changes
    transition screen, so the manager's feedback is saved with the transition.
-3. **Notify the manager.** Add a Jira automation rule to AUTOAPR: *Issue
-   created* or *Transitioned to Pending Approval*, then *Send web request* to a
+3. **Notify the manager.** Add a Jira automation rule to SOC, limited to
+   the rule-request issue type: *Issue created* or *Transitioned to Pending Approval*, then *Send web request* to a
    Microsoft Teams **Workflows** webhook (Teams → Workflows → "Post to a channel
-   when a webhook request is received"). The webhook URL works as a password:
+   when a webhook request is received"). The message can name the approver
+   with `{{issue.assignee.displayName}}`. The webhook URL works as a password:
    keep it only in the rule and never commit it. If your tenant blocks Workflows,
    use *Send email* instead.
 4. **Revise on Request Changes.** Add a second rule: *Transitioned to Changes
    Requested*, then *Use Rovo agent* with the custom agent and the revise prompt
    in [docs/rovo-agent-instructions.md](docs/rovo-agent-instructions.md). If
    this action is not available (spike S7), the requester asks Rovo to "revise
-   AUTOAPR-n" instead.
+   SOC-n" instead.
 5. **Create on Approved.** Add a third rule: *Transitioned to Approved*, then
    *Use Rovo agent* with the create prompt from the same file. The agent passes
    only the ticket key; the app creates the stored draft. Without *Use Rovo
-   agent*, the requester asks Rovo to "create AUTOAPR-n". Calling it twice is
+   agent*, the requester asks Rovo to "create SOC-n". Calling it twice is
    safe: the second call reports the rule that already exists.
 6. **Rovo Studio.** Replace the agent's instructions with the block in
    [docs/rovo-agent-instructions.md](docs/rovo-agent-instructions.md).
@@ -118,7 +129,7 @@ These steps are done once, by a Jira admin, in the Jira UI.
    `GET /rest/api/3/issue/{key}/transitions` on a test ticket) and set:
 
    ```text
-   forge variables set APPROVAL_PROJECT_KEY AUTOAPR --environment development
+   forge variables set APPROVAL_PROJECT_KEY SOC --environment development
    forge variables set APPROVAL_ISSUE_TYPE_ID <issue-type-id> --environment development
    forge variables set APPROVED_STATUS_ID <id> --environment development
    forge variables set CHANGES_REQUESTED_STATUS_ID <id> --environment development

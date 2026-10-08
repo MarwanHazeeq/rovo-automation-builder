@@ -53,7 +53,7 @@ leaves the old permission grant in place.
 | 1 | S1, S2, S3 | one deploy of the existing app | under an hour |
 | 2 | S4, S5 | governance project + a workflow with an Approve transition | half a day |
 | 3 | S6 | two rules in one project | an hour |
-| 4 | S7, S8, S9 | the approval flow deployed, AUTOAPR set up | an hour |
+| 4 | S7, S8, S9 | the approval flow deployed, SOC approval workflow set up | an hour |
 
 Batch 2's setup is not throwaway — the governance project and workflow are
 needed for the real build regardless.
@@ -388,7 +388,7 @@ here; disable or delete both when the spike is done.
 ### Why it matters
 
 Both revision (after **Request Changes**) and creation (after **Approved**)
-are event-initiated: a Jira automation rule in AUTOAPR runs the custom agent
+are event-initiated: a Jira automation rule in SOC runs the custom agent
 with the ticket key. Three things must all be true, and none is confirmed on
 this site: the action exists on this plan, it can target a *custom* agent, and
 an agent invoked this way (no human in the chat) is allowed to call a
@@ -396,7 +396,7 @@ an agent invoked this way (no human in the chat) is allowed to call a
 
 ### Method
 
-1. In AUTOAPR's automation, add a rule: *Transitioned to Changes Requested* →
+1. In SOC's automation, add a rule: *Transitioned to Changes Requested* →
    *Use Rovo agent* (custom agent), prompt from
    [rovo-agent-instructions.md](../rovo-agent-instructions.md).
 2. Request changes on a test ticket with a comment.
@@ -415,7 +415,7 @@ an agent invoked this way (no human in the chat) is allowed to call a
 
 - **Works:** the loop is fully automatic.
 - **Fails:** revision and creation become human-initiated (the user asks Rovo
-  to "revise AUTOAPR-n" or "create AUTOAPR-n"). Neither action needs a code
+  to "revise SOC-n" or "create SOC-n"). Neither action needs a code
   change: both check the live ticket rather than who called them.
 
 ---
@@ -466,7 +466,7 @@ not acquired` in `forge logs -e development --since 15m`.
 
 1. Draft a rule. Check the ticket for `draft-v1-<digest8>.json` and open it.
 2. Approve it via the UI. Before the create runs, read the history:
-   `GET /rest/api/3/issue/AUTOAPR-n/changelog` (as yourself, in a browser).
+   `GET /rest/api/3/issue/SOC-n/changelog` (as yourself, in a browser).
 3. Read `[create-approved]` lines in the Forge logs.
 
 ### Record
