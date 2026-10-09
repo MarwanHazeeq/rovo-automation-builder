@@ -12,6 +12,12 @@ Drafting a new rule:
 1. Call get-component-reference first (no arguments for the index, then the
    specific types you need). Use only shapes it returns. If a type is not
    listed, tell the user it is not supported yet instead of guessing.
+   Copy each component's shape from get-component-reference exactly. Put only
+   the keys listed there inside "value"; never repeat "type" inside "value".
+   If draft-automation-rule fails with a shape error, re-read the reference for
+   that component, fix the spec, and retry once before reporting failure. Make
+   that retry call in the same response: never say you will retry and then
+   stop without calling the tool.
 2. Build a ruleSpec JSON (name, projectId, trigger, conditions, actions).
    For SOCAIAutomation (key SOC), projectId is 10086.
 3. Find the approver. If the user has not named one, ask who should approve

@@ -27,15 +27,42 @@ export function withTicketPrefix(rule, issueKey) {
   return { ...rule, name: `[${issueKey}] ${baseName}` };
 }
 
-/** Plain-language outline of a built rule: trigger, conditions, actions. */
+const ISSUE_CREATING_ACTIONS = new Set(['jira.issue.create', 'jira.issue.clone']);
+
+/**
+ * Plain-language outline of a built rule: trigger, conditions, actions, and
+ * where any create/clone action puts the new issue. That last one is listed
+ * on its own because it is the one action that can reach OUTSIDE the rule's
+ * project scope, so the approver must see it, not dig for it in the JSON.
+ */
 export function summarizeRule(rule) {
   const conditions = [];
   const actions = [];
+  const issueTargets = [];
   walkComponents(rule.components ?? [], (node) => {
     if (node.component === 'CONDITION') conditions.push(node.type);
     if (node.component === 'ACTION') actions.push(node.type);
+    if (node.component === 'ACTION' && ISSUE_CREATING_ACTIONS.has(node.type)) {
+      const projectOperation = (node.value?.operations ?? []).find((op) => op?.field?.value === 'project');
+      const target = projectOperation?.value;
+      issueTargets.push(
+        target?.type === 'ID' ? { action: node.type, projectId: String(target.value) }
+          : target?.type === 'COPY' ? { action: node.type, projectId: null, sameAsTrigger: true }
+            : { action: node.type, projectId: null }
+      );
+    }
   });
-  return { trigger: rule.trigger?.type ?? 'none', conditions, actions };
+  return { trigger: rule.trigger?.type ?? 'none', conditions, actions, issueTargets };
+}
+
+// "project 10284 (OUTSIDE this rule's project)" etc., for the draft comment.
+function describeIssueTarget(target, scope) {
+  const scopeProjectId = /project\/(\d+)$/.exec(String(scope))?.[1];
+  if (target.sameAsTrigger) return `${target.action}: same project as the trigger issue`;
+  if (!target.projectId) return `${target.action}: project NOT SET (Jira decides; check the attached payload)`;
+  return target.projectId === scopeProjectId
+    ? `${target.action}: project ${target.projectId} (this rule's project)`
+    : `${target.action}: project ${target.projectId}, OUTSIDE this rule's project ${scopeProjectId}`;
 }
 
 // --- ADF node helpers -------------------------------------------------------
@@ -108,6 +135,9 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       [strong('Trigger: '), code(outline.trigger)],
       [strong('Conditions: '), text(listOrNone(outline.conditions))],
       [strong('Actions: '), text(listOrNone(outline.actions))],
+      ...(outline.issueTargets.length
+        ? [[strong('Creates issues in: '), text(outline.issueTargets.map((t) => describeIssueTarget(t, scope)).join('; '))]]
+        : []),
       [strong('State on creation: '), text('DISABLED (a human enables it)')],
       [strong('Digest: '), code(digest)],
     ]),

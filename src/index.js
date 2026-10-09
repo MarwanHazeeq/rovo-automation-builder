@@ -64,6 +64,77 @@ const TRIGGER_BUILDERS = {
       };
     },
   },
+  // The event triggers below come from the rule survey
+  // (scripts/find-component-examples.js --survey); each names its source rule.
+  // Like `created`, eventFilters is always the rule's own project.
+  // "CLSA Jira-Sentinel Comments V2". PRIMARY_ACTION (a comment was added) is
+  // the only eventTypes value seen, so it is the only one built.
+  'jira.issue.event.trigger:commented': {
+    schemaVersion: 1,
+    buildValue(_trigger, scope) {
+      return { eventTypes: ['PRIMARY_ACTION'], eventFilters: [scope] };
+    },
+  },
+  // "Assign SHG MO CSO Request Participants Automatically".
+  'jira.issue.event.trigger:updated': issueEventTrigger('jira:issue_updated', 'issue_updated'),
+  // "Time to first response calculation".
+  'jira.issue.event.trigger:assigned': issueEventTrigger('jira:issue_updated', 'issue_assigned'),
+  // "Delete Issue Log". That rule is SITE-scoped (eventFilters is the site
+  // ARI); this app scopes it to one project like every other event trigger,
+  // so the project-scoped form is unverified until the first one is created
+  // and its GET read-back passes.
+  'jira.issue.event.trigger:deleted': issueEventTrigger('jira:issue_deleted', 'issue_deleted'),
+  // "Jira-ITHUB (Move Ticket)": sourceProject "10218", targetProject "-1999".
+  // -1999 appears to mean "any project" (it is not a real project id).
+  'jira.issue.event.trigger:moved': {
+    schemaVersion: 1,
+    buildValue(trigger, scope) {
+      const triggerValue = trigger.value || {};
+      const projectFilter = (raw, label) => {
+        const text = String(raw ?? '-1999').trim();
+        if (text !== '-1999' && !/^\d+$/.test(text)) {
+          throw new Error(`trigger.${label} must be a numeric project ID, or "-1999" for any project.`);
+        }
+        return text;
+      };
+      return {
+        ...issueEventTrigger('jira:issue_updated', 'issue_moved').buildValue(trigger, scope),
+        sourceProject: projectFilter(trigger.sourceProject ?? triggerValue.sourceProject, 'sourceProject'),
+        targetProject: projectFilter(trigger.targetProject ?? triggerValue.targetProject, 'targetProject'),
+      };
+    },
+  },
+  // Non-event triggers: no eventFilters, so (like jira.jql.scheduled) they are
+  // confined by ruleScopeARIs alone; see RULE_SCOPED_TRIGGER_TYPES. Their
+  // value is taken from the spec and checked against the verified keys.
+  // "Test SLA Notification".
+  'jira.sla.threshold.trigger': {
+    schemaVersion: 1,
+    buildValue(trigger) {
+      return verifiedTriggerValue(trigger, ['customFieldId', 'thresholdType', 'thresholdValue', 'scheduleConfigIdSet']);
+    },
+  },
+  // "When a deployment is completed, failed or canceled → then transition request accordingly".
+  'devops.deploy.event.trigger:statechange': {
+    schemaVersion: -1,
+    buildValue(trigger) {
+      return verifiedTriggerValue(trigger, ['environments', 'states']);
+    },
+  },
+  // "ManageEngine_Update_Webhook". Jira generates the secret webhookToken
+  // itself; this app never handles it (invariant 5), so it is never sent and a
+  // spec that tries to supply one is rejected. A human copies the generated
+  // URL from the Automation UI after approval.
+  'jira.incoming.webhook': {
+    schemaVersion: 1,
+    buildValue(trigger) {
+      const triggerValue = trigger.value || {};
+      if ('webhookToken' in trigger || 'webhookToken' in triggerValue) {
+        throw new Error('Do not supply webhookToken: Jira generates it, and this app never handles it.');
+      }
+      return verifiedTriggerValue(trigger, ['searchOrProvide', 'jql']);
+    },
+  },
   // Verified against BulkUpdate.txt (Historical_Time to First Response). This
   // trigger runs the rule body ONCE PER ISSUE matching `jql`, which is the
   // only iteration primitive available on this tenant - there is no iterative
@@ -105,7 +176,40 @@ const TRIGGER_BUILDERS = {
 // trigger has no eventFilters at all, so applying that check to it would
 // reject every scheduled rule. ruleScopeARIs is still required and still has
 // to be exactly one project, so the safety boundary is unchanged.
-const RULE_SCOPED_TRIGGER_TYPES = new Set(['jira.jql.scheduled']);
+const RULE_SCOPED_TRIGGER_TYPES = new Set([
+  'jira.jql.scheduled',
+  'jira.sla.threshold.trigger',
+  'devops.deploy.event.trigger:statechange',
+  'jira.incoming.webhook',
+]);
+
+// A plain Jira issue-event trigger: fixed event names plus the rule's project.
+function issueEventTrigger(eventKey, issueEvent) {
+  return {
+    schemaVersion: 1,
+    buildValue(_trigger, scope) {
+      return { eventKey, issueEvent, eventFilters: [scope] };
+    },
+  };
+}
+
+// The trigger's value taken from the spec (either trigger.value or the
+// trigger's own keys), with EXACTLY the verified keys: a missing key or an
+// invented synonym fails here with its name instead of as an opaque API 400.
+function verifiedTriggerValue(trigger, keys) {
+  const source = trigger.value && typeof trigger.value === 'object' ? trigger.value : trigger;
+  const supplied = Object.keys(source).filter((key) => key !== 'type' && key !== 'schemaVersion');
+  const missing = keys.filter((key) => !(key in source));
+  const unexpected = supplied.filter((key) => !keys.includes(key));
+  if (missing.length > 0 || unexpected.length > 0) {
+    throw new Error(
+      `trigger "${trigger.type}" takes exactly: ${keys.join(', ')}` +
+        (missing.length ? `; missing ${missing.join(', ')}` : '') +
+        (unexpected.length ? `; unexpected ${unexpected.join(', ')}` : '') + '.'
+    );
+  }
+  return Object.fromEntries(keys.map((key) => [key, source[key]]));
+}
 
 const ALLOWED_TRIGGER_TYPES = Object.keys(TRIGGER_BUILDERS);
 const ALLOWED_ACTION_TYPES = [
@@ -119,10 +223,24 @@ const ALLOWED_ACTION_TYPES = [
   'jira.issue.refresh.issue',
   'jira.create.mapping-variable',
   'jira.issue.comment',
+  // Added from the rule survey; shapes and sources are in component-library.js.
+  'jira.issue.assign',
+  'jira.issue.outgoing.email',
+  'jira.auto.approve.action',
+  'rovo.invoke-agent.action',
+  'jira.issue.related',
+  'jira.lookup.issues',
+  'jira.edit.request.type',
+  'jira.proforma.form.add.action',
+  'jira.issue.create',
+  'jira.issue.clone',
 ];
 const ALLOWED_CONDITION_TYPES = [
   'jira.comparator.condition',
   'jira.issue.condition',
+  'jira.jql.condition',
+  'jira.user.condition',
+  'jira.affected.services.condition',
 ];
 const ALLOWED_STRUCTURAL_TYPES = [
   'jira.condition.container.block',
@@ -180,23 +298,101 @@ const EDIT_OPERATION_VALUE_BUILDERS = {
   // no { type, value } wrapper. Confirmed against a real rule that sets a
   // "Customer ITSM Incident" text field from a webhook response.
   'com.atlassian.jira.plugin.system.customfieldtypes:textfield': (value) => String(value),
+  // The shapes below come from the rule survey (scripts/find-component-examples.js
+  // --survey); each names the tenant rule it was copied from.
+  // "Start date cf" in "Test Workflow-status-time-calculator using ChangeLog":
+  // a plain string, typically a smart value such as {{now}}.
+  'com.atlassian.jira.plugin.system.customfieldtypes:datetime': (value) => String(value),
+  // "Organizations" in "Assign CAM Organization & Request Participants
+  // Automatically": a list of NUMERIC organization ids.
+  'com.atlassian.servicedesk:sd-customer-organizations': (value) =>
+    toList(value).map((id) => ({ type: 'ID', value: numericId(id, 'Organizations') })),
+  // "Request participants" in the same rule: a list of account ids (portal
+  // customers have "qm:..." ids, licensed users plain ones), kept as strings.
+  'com.atlassian.servicedesk:sd-request-participants': (value) =>
+    toList(value).map((id) => ({ type: 'ID', value: nonEmptyString(String(id), 'Request participants id') })),
 };
+
+// System fields (schema.system) that jira.issue.edit can set. Unlike custom
+// fields they are addressed by ID ({ type: 'ID', value: 'assignee' }) with a
+// bare fieldType, and some need their own operation type, so each builder
+// returns the whole { type, value } pair. Sources (labels: Auto-Triage.txt; the rest from the rule survey):
+// assignee "Assign SDG Organization Automatically", priority
+// "ManageEngine_Update_Webhook", description "NTCJ P2 Request Participants
+// Update", attachment "Copy Triage Report to Customer View".
+const SYSTEM_EDIT_OPERATION_BUILDERS = {
+  // Auto-Triage.txt (labels set during a transition): an array of { NAME } entries.
+  labels: (value) => ({ type: 'SET', value: toList(value).map((label) => ({ type: 'NAME', value: String(label) })) }),
+  assignee: (value) => ({ type: 'SET', value: { type: 'ID', value: nonEmptyString(String(value), 'assignee account id') } }),
+  priority: (value) => ({ type: 'SET', value: { type: 'ID', value: numericId(value, 'priority').toString() } }),
+  description: (value) => ({ type: 'SET', value: String(value) }),
+  // Only "copy every attachment from the trigger issue" has been seen, so
+  // that is the only accepted value: the string "trigger".
+  attachment: (value) => {
+    if (value !== 'trigger') {
+      throw new Error('attachment can only be copied from the trigger issue: set its value to "trigger".');
+    }
+    return {
+      type: 'COPY',
+      value: { copyOptions: [], sourceIssue: 'trigger', sourceField: { type: 'ID', value: 'attachment', fieldType: 'attachment' } },
+    };
+  },
+};
+
+// A single value or a list of values, as a list.
+function toList(value) {
+  return Array.isArray(value) ? value : [value];
+}
+
+// A Jira entity id given as a number or a numeric string, returned as a number.
+// A display name here would be stored as-is and silently never match.
+function numericId(value, label) {
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`${label} needs a numeric ID such as "2", not "${text}". Look the ID up with the Search fields tool.`);
+  }
+  return Number(text);
+}
 
 // Same idea as EDIT_OPERATION_VALUE_BUILDERS, but for jira.issue.condition's
 // compareValue, which needs its own per-fieldType wrapper. Confirmed only for
 // select fields so far (a real "Send to Customer ITSM equals Yes" condition).
+const nameCompareValue = (value) => ({
+  type: 'NAME',
+  modifier: null,
+  value: String(value),
+  multiValue: false,
+  source: null,
+});
 const CONDITION_FIELD_VALUE_BUILDERS = {
-  'com.atlassian.jira.plugin.system.customfieldtypes:select': (value) => ({
-    type: 'NAME',
-    modifier: null,
-    value: String(value),
-    multiValue: false,
-    source: null,
-  }),
+  'com.atlassian.jira.plugin.system.customfieldtypes:select': nameCompareValue,
+  // JSM "Request Type", compared by request type NAME. From the rule survey:
+  // "When a change request is created → then attach the default change
+  // management form" (value "Request a change"); 24 rules use it.
+  'com.atlassian.servicedesk:vp-origin': nameCompareValue,
 };
 
-// jira.issue.condition only has a confirmed shape for this one comparison.
-// Anything else is rejected rather than guessed, same policy as field types.
+// System fields (schema.system in Jira's field metadata) that jira.issue.condition
+// can compare. selectedField is ID-based for all of them, but compareValue is
+// NOT uniform, so each field records what the tenant rules show:
+// - issuetype: ID (Auto-Triage.txt)
+// - priority: ID ("NTCJ P2 Request Participants Update", "Test SLA Notification")
+// - project: ID ("Cisco XDR - Status update")
+// - status: NAME ("Test Workflow-status-time-calculator using ChangeLog")
+// - summary: VALUE with STARTS_WITH ("EnnoviPOC_CreateTicket_ServiceDeskPlus")
+// The last four were found with scripts/find-component-examples.js --survey.
+const SYSTEM_CONDITION_FIELDS = {
+  issuetype: { compareType: 'ID', comparisons: ['EQUALS'] },
+  priority: { compareType: 'ID', comparisons: ['EQUALS'] },
+  project: { compareType: 'ID', comparisons: ['EQUALS'] },
+  status: { compareType: 'NAME', comparisons: ['EQUALS'] },
+  summary: { compareType: 'VALUE', comparisons: ['STARTS_WITH'] },
+};
+const VERIFIED_SYSTEM_CONDITION_FIELDS = Object.keys(SYSTEM_CONDITION_FIELDS);
+
+// Custom-field jira.issue.condition only has a confirmed shape for this one
+// comparison (system fields list their own above). Anything else is rejected
+// rather than guessed, same policy as field types.
 const VERIFIED_CONDITION_COMPARISONS = ['EQUALS'];
 
 /**
@@ -692,12 +888,23 @@ function buildEditOperation(fieldSpec, fieldMetadata, resolvedField) {
   }
 
   const jiraField = resolvedField || findJiraField(fieldName, fieldMetadata);
+
+  // System fields are addressed by ID with a bare fieldType, and their builder
+  // supplies the operation type too (attachment is COPY, not SET).
+  const systemField = jiraField.schema?.system;
+  const systemBuilder = systemField && SYSTEM_EDIT_OPERATION_BUILDERS[systemField];
+  if (systemBuilder) {
+    return { field: { type: 'ID', value: systemField }, fieldType: systemField, ...systemBuilder(fieldSpec.value) };
+  }
+
   const fieldType = jiraField.schema?.custom;
   const valueBuilder = fieldType && EDIT_OPERATION_VALUE_BUILDERS[fieldType];
   if (!valueBuilder) {
     throw new Error(
       `Field "${fieldName}" has type "${fieldType || jiraField.schema?.type || 'unknown'}", ` +
-        'which is not on the verified list for jira.issue.edit operations (currently: single-select and text fields). ' +
+        'which is not on the verified list for jira.issue.edit operations (currently: ' +
+        `${Object.keys(EDIT_OPERATION_VALUE_BUILDERS).map((type) => type.split(':').pop()).join(', ')}, ` +
+        `and system fields ${Object.keys(SYSTEM_EDIT_OPERATION_BUILDERS).join(', ')}). ` +
         'Numeric float custom fields are supported through advancedFields.'
     );
   }
@@ -964,6 +1171,13 @@ function assertVerifiedComponentValue(kind, type, value) {
     );
   }
 
+  // A key whose verified value is null means "not set" in the export, and an
+  // LLM tends to drop such keys as optional. Fill them in (on the caller's
+  // value object) rather than fail; a missing key with a real value still fails.
+  for (const [key, exampleValue] of Object.entries(entry.example)) {
+    if (exampleValue === null && !(key in value)) value[key] = null;
+  }
+
   const expected = Object.keys(entry.example);
   const supplied = Object.keys(value);
   const missing = expected.filter((key) => !(key in value));
@@ -1095,17 +1309,23 @@ function buildIssueFieldCondition(conditionSpec, fieldMetadata) {
     throw new Error(`conditions[].value.value is required for field "${fieldName}".`);
   }
   const comparison = conditionSpec.comparison || 'EQUALS';
-  if (!VERIFIED_CONDITION_COMPARISONS.includes(comparison)) {
-    throw new Error(
-      `comparison "${comparison}" is not on the verified list for jira.issue.condition (currently: ${VERIFIED_CONDITION_COMPARISONS.join(', ')}).`
-    );
-  }
+  // Checked once the field is known, because verified comparisons differ per field.
+  const assertComparison = (verified) => {
+    if (!verified.includes(comparison)) {
+      throw new Error(
+        `comparison "${comparison}" is not verified for jira.issue.condition on field "${fieldName}" ` +
+          `(currently: ${verified.join(', ')}). Use jira.comparator.condition for other comparisons.`
+      );
+    }
+  };
 
   const matches = fieldMetadata.filter(
     (field) =>
       field &&
       typeof field.name === 'string' &&
-      field.name.trim().toLowerCase() === fieldName.trim().toLowerCase()
+      (field.name.trim().toLowerCase() === fieldName.trim().toLowerCase() ||
+        // Also accept the field's ID, so "issuetype" finds "Issue Type".
+        field.id === fieldName.trim())
   );
   if (matches.length === 0) {
     throw new Error(`No Jira field named "${fieldName}" was found on this site.`);
@@ -1117,15 +1337,42 @@ function buildIssueFieldCondition(conditionSpec, fieldMetadata) {
     );
   }
 
+  // System fields: compareValue's type differs per field (see
+  // SYSTEM_CONDITION_FIELDS). For ID-compared fields the tenant rules store
+  // e.g. priority "2", never "High"; a name would be saved as-is and the
+  // condition would silently never match, so it is rejected here.
+  const systemField = matches[0].schema?.system;
+  const systemShape = systemField && SYSTEM_CONDITION_FIELDS[systemField];
+  if (systemShape) {
+    assertComparison(systemShape.comparisons);
+    const compared = systemShape.compareType === 'ID'
+      ? String(numericId(conditionSpec.value, `Field "${fieldName}"`))
+      : String(conditionSpec.value);
+    return {
+      selectedField: { type: 'ID', value: systemField },
+      selectedFieldType: systemField,
+      comparison,
+      compareValue: { type: systemShape.compareType, modifier: null, value: compared, multiValue: false, source: null },
+    };
+  }
+
   const fieldType = matches[0].schema?.custom;
   const valueBuilder = fieldType && CONDITION_FIELD_VALUE_BUILDERS[fieldType];
   if (!valueBuilder) {
+    // Point the agent at the verified comparator condition, which compares
+    // smart values and so works for any field, instead of dead-ending.
+    const fieldId = matches[0].id || matches[0].key || fieldName;
     throw new Error(
       `Field "${fieldName}" has type "${fieldType || matches[0].schema?.type || 'unknown'}", ` +
-        'which is not on the verified list for jira.issue.condition (currently: single-select fields only).'
+        'which is not on the verified list for jira.issue.condition ' +
+        `(currently: single-select and request-type custom fields, and ${VERIFIED_SYSTEM_CONDITION_FIELDS.join(', ')}). ` +
+        'Use jira.comparator.condition instead: first = the field\'s smart value ' +
+        `(e.g. "{{issue.${fieldId}}}", or "{{issue.${fieldId}.name}}" for fields like status), ` +
+        'second = the value, operator EQUALS.'
     );
   }
 
+  assertComparison(VERIFIED_CONDITION_COMPARISONS);
   return {
     selectedField: { type: 'NAME', value: matches[0].name },
     selectedFieldType: fieldType,
@@ -1254,7 +1501,8 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     return component('CONDITION', condition.type, value, {
       conditionParentId: conditionBlockId,
       schemaVersion:
-        condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] || 1,
+        condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] ||
+        CONDITION_LIBRARY[condition.type]?.schemaVersion || 1,
     });
   });
 
@@ -1334,6 +1582,15 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       };
     }
 
+    if (action.type === 'jira.proforma.form.add.action') {
+      // The form is attached from the rule's OWN project's templates, whatever
+      // the spec says, so a draft cannot reach into another project's forms.
+      value = {
+        ...value,
+        templateFormsConfig: { ...(value.templateFormsConfig || {}), projectId: Number(projectId) },
+      };
+    }
+
     assertVerifiedComponentValue('action', action.type, value);
 
     // With no conditions there is no if-block to hang actions off, so they sit
@@ -1342,7 +1599,8 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     // that has no conditions.
     return component('ACTION', action.type, value, {
       parentId: hasConditions ? conditionBlockId : null,
-      schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] || 1,
+      schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] ||
+        ACTION_LIBRARY[action.type]?.schemaVersion || 1,
     });
   });
 
@@ -1515,6 +1773,24 @@ function validateRulePayload(requestBody, configuredCloudId) {
         error: 'ruleScopeARIs and trigger.value.eventFilters must use the same project scope.',
       };
     }
+  }
+
+  // A pasted full payload skips the builder, so the rules the builder enforces
+  // for these types are re-checked here, on both input paths. An incoming
+  // webhook's token is a secret Jira generates (invariant 5), and a ProForma
+  // form must come from the rule's own project.
+  if (rule.trigger.type === 'jira.incoming.webhook' && rule.trigger.value?.webhookToken) {
+    return { ok: false, error: 'An incoming webhook trigger must not carry a webhookToken; Jira generates it.' };
+  }
+  const foreignForms = [];
+  walkComponents(rule.components, (node) => {
+    const formProjectId = node.type === 'jira.proforma.form.add.action' && node.value?.templateFormsConfig?.projectId;
+    if (formProjectId !== undefined && formProjectId !== false && String(formProjectId) !== scopeMatch[2]) {
+      foreignForms.push(String(formProjectId));
+    }
+  });
+  if (foreignForms.length > 0) {
+    return { ok: false, error: `ProForma forms must come from the rule's own project ${scopeMatch[2]}, not ${foreignForms.join(', ')}.` };
   }
 
   if (configuredCloudId !== scopeMatch[1]) {
@@ -1735,4 +2011,16 @@ function safeStringify(value) {
 
 // Helpers shared with the draft/approval modules. They are pure functions;
 // exporting them keeps one implementation of digesting and redaction.
-export { canonicalJson, sha256, redactSecrets, walkComponents, failure };
+export {
+  canonicalJson,
+  sha256,
+  redactSecrets,
+  walkComponents,
+  failure,
+  // Read by scripts/find-component-examples.js --survey to mark which field types are supported.
+  CONDITION_FIELD_VALUE_BUILDERS,
+  VERIFIED_SYSTEM_CONDITION_FIELDS,
+  EDIT_OPERATION_VALUE_BUILDERS,
+  SYSTEM_EDIT_OPERATION_BUILDERS,
+  FLOAT_CUSTOM_FIELD_TYPE,
+};

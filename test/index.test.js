@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createAndVerifyRule, createJiraAutomationRule, onCreateOutcome } from '../src/index.js';
+import { createAndVerifyRule, createJiraAutomationRule, onCreateOutcome, walkComponents } from '../src/index.js';
 
 const FIELD_METADATA = [
   {
@@ -563,4 +563,73 @@ test('createAndVerifyRule re-validates a stored rule and never POSTs one that is
   assert.equal(result.ok, false);
   assert.match(result.error, /DISABLED/);
   assert.equal(posted, false);
+});
+
+// Shapes as Jira's /rest/api/3/field returns them for system fields.
+const SYSTEM_FIELD_METADATA = [
+  { id: 'priority', key: 'priority', name: 'Priority', schema: { type: 'priority', system: 'priority' } },
+  { id: 'issuetype', key: 'issuetype', name: 'Issue Type', schema: { type: 'issuetype', system: 'issuetype' } },
+  { id: 'labels', key: 'labels', name: 'Labels', schema: { type: 'array', items: 'string', system: 'labels' } },
+];
+
+async function draftWithCondition(conditionValue) {
+  let createdRule;
+  const result = await withForgeEnvironment(async (url, options = {}) => {
+    if (url.endsWith('/rest/api/3/field')) return mockResponse(200, SYSTEM_FIELD_METADATA);
+    if (options.method === 'POST') {
+      createdRule = JSON.parse(options.body).rule;
+      return mockResponse(201, { ruleUuid: 'created-rule-id' });
+    }
+    return mockResponse(200, { rule: createdRule });
+  }, () => createJiraAutomationRule({
+    ruleSpec: JSON.stringify({
+      name: 'System field condition',
+      projectId: '10449',
+      trigger: { type: 'jira.issue.event.trigger:created' },
+      conditions: [{ type: 'jira.issue.condition', value: conditionValue }],
+      actions: [{ type: 'codebarrel.action.log', value: 'matched' }],
+    }),
+  }));
+  const conditions = [];
+  walkComponents(createdRule?.components, (node) => {
+    if (node.type === 'jira.issue.condition') conditions.push(node.value);
+  });
+  return { result, conditions };
+}
+
+test('builds a priority condition by numeric ID, matching the tenant rule shape', async () => {
+  const { result, conditions } = await draftWithCondition({ name: 'Priority', value: '2' });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(conditions, [{
+    selectedField: { type: 'ID', value: 'priority' },
+    selectedFieldType: 'priority',
+    comparison: 'EQUALS',
+    compareValue: { type: 'ID', modifier: null, value: '2', multiValue: false, source: null },
+  }]);
+});
+
+test('builds an issuetype condition when the field is given by its ID', async () => {
+  const { result, conditions } = await draftWithCondition({ name: 'issuetype', value: 10001 });
+
+  assert.equal(result.ok, true);
+  assert.equal(conditions[0].selectedFieldType, 'issuetype');
+  assert.equal(conditions[0].compareValue.value, '10001');
+});
+
+test('rejects a system-field condition given a display name instead of an ID', async () => {
+  const { result } = await draftWithCondition({ name: 'Priority', value: 'High' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /numeric ID.*not "High"/);
+});
+
+test('still rejects a system field that has no verified condition shape', async () => {
+  const { result } = await draftWithCondition({ name: 'Labels', value: 'soc' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /not on the verified list for jira\.issue\.condition/);
+  // The agent is steered to the generic comparator rather than dead-ending.
+  assert.match(result.error, /jira\.comparator\.condition/);
+  assert.match(result.error, /\{\{issue\.labels\}\}/);
 });
