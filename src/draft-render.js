@@ -43,9 +43,6 @@ export function summarizeRule(rule) {
 const text = (value, marks) => ({ type: 'text', text: String(value), ...(marks ? { marks } : {}) });
 const strong = (value) => text(value, [{ type: 'strong' }]);
 const code = (value) => text(value, [{ type: 'code' }]);
-// An @mention. Jira renders the account's current display name, so the app
-// never needs to look the name up (or store it).
-const mention = (accountId) => ({ type: 'mention', attrs: { id: String(accountId) } });
 const paragraph = (...content) => ({ type: 'paragraph', content });
 const heading = (level, value) => ({ type: 'heading', attrs: { level }, content: [text(value)] });
 const bulletList = (items) => ({
@@ -112,13 +109,7 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       [strong('Digest: '), code(digest)],
     ]),
     attachmentLine,
-    // The assignee is who is NOTIFIED. Whether a rule may be created is
-    // decided only by the changelog + APPROVER_ACCOUNT_IDS check in
-    // src/create-approved.js, never by who the ticket is assigned to.
-    record.approverAccountId
-      ? paragraph(strong('Sent for approval to: '), mention(record.approverAccountId))
-      : paragraph(strong('Sent for approval to: '), text('nobody yet (unassigned). Assign the ticket to an approver.')),
-    paragraph(text('Approve to have the agent create exactly this rule. Request Changes to have it revised. Reject to cancel.'))
+    paragraph(text('Any member of the approver group can review this. Approve to have the agent create exactly this rule. Request Changes to have it revised. Reject to cancel.'))
   );
 }
 

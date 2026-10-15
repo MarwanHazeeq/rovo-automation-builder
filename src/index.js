@@ -1592,7 +1592,7 @@ function redactSecrets(value) {
   for (const [key, entry] of Object.entries(value)) {
     if (key === 'headers' && Array.isArray(entry)) {
       out[key] = entry.map((header) => ({ ...header, value: '[redacted]' }));
-    } else if (/token|secret|password|authorization/i.test(key)) {
+    } else if (/token|secret|password|authorization|webhook_?url/i.test(key)) {
       out[key] = '[redacted]';
     } else {
       out[key] = redactSecrets(entry);
@@ -1735,4 +1735,4 @@ function safeStringify(value) {
 
 // Helpers shared with the draft/approval modules. They are pure functions;
 // exporting them keeps one implementation of digesting and redaction.
-export { canonicalJson, sha256, redactSecrets, walkComponents, failure };
+export { canonicalJson, sha256, redactSecrets, walkComponents, failure, safeStringify };

@@ -1,5 +1,5 @@
 import { createAndVerifyRule } from './index.js';
-import { readApprovalConfig } from './approval-config.js';
+import { resolveApprovalConfig } from './approval-config.js';
 import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
 import { renderAttentionComment, renderCreatedComment, renderNotCreatedComment } from './draft-render.js';
@@ -23,7 +23,8 @@ import { renderAttentionComment, renderCreatedComment, renderNotCreatedComment }
  *
  *   1. The ticket is in the approval project and its LIVE status is Approved.
  *   2. Jira's own changelog says who made the latest move to Approved, and
- *      that person is in APPROVER_ACCOUNT_IDS. (The workflow should already
+ *      that person is a member of the APPROVER_GROUP_ID group, checked now,
+ *      not when they approved. (The workflow should already
  *      limit the Approve button to approvers; this check still holds if that
  *      workflow condition is removed or the workflow is copied without it.)
  *   3. That approval happened AFTER the stored draft's latest version was
@@ -51,7 +52,7 @@ export function createApprovedRuleActions({
 } = {}) {
   return {
     async createApprovedAutomationRule(payload) {
-      const configResult = readApprovalConfig(getEnv());
+      const configResult = await resolveApprovalConfig(jira, getEnv());
       if (!configResult.ok) return refused(configResult.error);
       const { config } = configResult;
 
@@ -91,13 +92,21 @@ export function createApprovedRuleActions({
 
       // --- 3. Jira's changelog must show a valid, current approval ----------
       let approval;
+      let approverInGroup = false;
       try {
         approval = latestApproval(await jira.getChangelog(issueKey), config.approvedStatusId);
+        const approver = approval?.author?.accountId;
+        if (approver) approverInGroup = await jira.isUserInGroup(approver, config.approverGroupId);
       } catch (error) {
-        return refused(`The history of ${issueKey} could not be read (${error.message}). Try again shortly.`);
+        // A failed read is not a finding about the approval, so nothing is
+        // recorded and a retry is safe.
+        return refused(
+          `The history of ${issueKey} or its approver's group membership could not be read (${error.message}). ` +
+            'Try again shortly.'
+        );
       }
 
-      const approvalProblem = checkApproval(approval, draft, config, issueKey);
+      const approvalProblem = checkApproval(approval, approverInGroup, draft, issueKey);
       if (approvalProblem) {
         // A real finding, not a transient error: record it so later calls are
         // answered from storage, and tell the humans on the ticket.
@@ -212,14 +221,14 @@ export function latestApproval(entries, approvedStatusId) {
 }
 
 /** Returns why the approval is not valid for this draft, or null if it is. */
-function checkApproval(approval, draft, config, issueKey) {
+function checkApproval(approval, approverInGroup, draft, issueKey) {
   if (!approval) {
     return `The history of ${issueKey} shows no move to Approved, so the approval cannot be verified. Nothing was created.`;
   }
   const approver = approval.author?.accountId ?? null;
-  if (!approver || !config.approverAccountIds.includes(approver)) {
+  if (!approver || !approverInGroup) {
     return (
-      `${issueKey} was moved to Approved by an account that is not in APPROVER_ACCOUNT_IDS ` +
+      `${issueKey} was moved to Approved by an account that is not in the approver group ` +
       `(${approver ?? 'unknown'}). Nothing was created. Ask an approver to raise a new request.`
     );
   }

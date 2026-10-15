@@ -13,10 +13,11 @@ the result on the ticket. The agent chooses *when* the rule is created, never
 *what* is created.
 
 ```
-Rovo agent ──draft──> approval ticket (Pending Approval) ──Teams──> manager
+Rovo agent ──draft──> approval ticket (Pending) + draft attached
+                     → labelled ready-for-review ──Teams heads-up──> manager
   Approve          → Jira automation runs the agent → create-approved-automation-rule
                      → rule created DISABLED, "Rule created" comment
-  Request Changes  → Jira automation runs the agent → Draft v2 → Pending Approval
+  Request Changes  → Jira automation runs the agent → Draft v2 → Pending
   Reject           → nothing created
 ```
 
@@ -90,31 +91,32 @@ These steps are done once, by a Jira admin, in the Jira UI.
    - approved rules can exclude it (issue type ≠ Automation Request), so a rule
      that fires on SOC issues does not also fire on approval tickets.
 
-   Put the **Assignee** field on that issue type's create screen, and give
-   requesters the **Assign Issues** permission in SOC: the app assigns the
-   ticket to the approver when it raises it, and Jira rejects the whole create
-   request otherwise. The assignee is who gets notified, not who may approve.
-2. **Workflow.** Give that issue type this workflow:
+   The app sends **no assignee**, so Jira's project default applies (on SOC,
+   the project lead). Any member of the approver group can pick a ticket up.
+   Being the assignee grants nothing.
+2. **Workflow.** Give that issue type this workflow. These are the names on
+   SOC ("LDX Automation Spec-Build Workflow") and the setup script's defaults;
+   other sites can use other names and pass them to the script:
 
    | From | Transition | To | Who |
    |---|---|---|---|
-   | Pending Approval | Approve | Approved | approvers only (workflow condition) |
-   | Pending Approval | Request Changes | Changes Requested | approvers only |
-   | Pending Approval | Reject | Rejected | approvers only |
-   | Changes Requested | Resubmit | Pending Approval | the app (and admins) |
-   | Changes Requested | Reject | Rejected | approvers only |
+   | Pending | pending approval | Approved | approvers only (workflow condition) |
+   | Pending | request changes | Change Request | approvers only |
+   | Pending | rejected | Declined | approvers only |
+   | Change Request | resubmit pending | Pending | the app (and admins) |
+   | Approved | Automation built | Done | after the rule is enabled |
+   | Declined | automation not built | Done | |
 
-   Approved and Rejected are final. Add a comment field to the Request Changes
-   transition screen, so the manager's feedback is saved with the transition.
-3. **Notify the manager.** Add a Jira automation rule to SOC, limited to
-   the rule-request issue type: *Issue created* or *Transitioned to Pending Approval*, then *Send web request* to a
-   Microsoft Teams **Workflows** webhook (Teams → Workflows → "Post to a channel
-   when a webhook request is received"). The message can name the approver
-   with `{{issue.assignee.displayName}}`. The webhook URL works as a password:
-   keep it only in the rule and never commit it. If your tenant blocks Workflows,
-   use *Send email* instead.
-4. **Revise on Request Changes.** Add a second rule: *Transitioned to Changes
-   Requested*, then *Use Rovo agent* with the custom agent and the revise prompt
+   The way back from Change Request must be ONE transition straight to Pending:
+   the app makes exactly one transition after storing a revised draft, so a
+   middle status would leave the ticket where nobody can approve it. Add a
+   comment field to the request changes transition screen, so the manager's
+   feedback is saved with the transition.
+3. **Notify the manager.** The app marks the ticket ready once the draft is
+   attached; the Teams message is set up as described in
+   [Manager notification (Teams)](#manager-notification-teams).
+4. **Revise on Request Changes.** Add a second rule: *Transitioned to Change
+   Request*, then *Use Rovo agent* with the custom agent and the revise prompt
    in [docs/rovo-agent-instructions.md](docs/rovo-agent-instructions.md). If
    this action is not available (spike S7), the requester asks Rovo to "revise
    SOC-n" instead.
@@ -125,30 +127,133 @@ These steps are done once, by a Jira admin, in the Jira UI.
    safe: the second call reports the rule that already exists.
 6. **Rovo Studio.** Replace the agent's instructions with the block in
    [docs/rovo-agent-instructions.md](docs/rovo-agent-instructions.md).
-7. **Forge variables.** Find the IDs (Jira settings → Issues → Statuses, or
-   `GET /rest/api/3/issue/{key}/transitions` on a test ticket) and set:
+7. **Approver group.** Create a Jira group for approvers (for example
+   `soc-automation-approvers`), add the approvers, and note its **group ID**
+   (Jira admin → User management → Groups, or `GET /rest/api/3/group/bulk`).
+   Adding or removing an approver is then a Jira admin task with no redeploy.
+   Whoever can edit this group decides who may approve rule creation, so keep
+   it admin-managed. Use the same group in the workflow's Approve condition.
+8. **Forge variables.** The setup script checks the values on the site and
+   then sets all six. Create `.env` in the repo root (it is git-ignored) with
+   a Jira login that can browse the project and its groups:
+
+   ```text
+   JIRA_SITE_URL=https://<your-site>.atlassian.net
+   JIRA_EMAIL=<your Atlassian email>
+   JIRA_API_TOKEN=<token from id.atlassian.com > Security > API tokens>
+   ```
+
+   Then run it with the approver group ID. The workflow names default to the
+   ones above; override any of them with `--project`, `--issue-type`,
+   `--approved`, `--changes-requested`, `--resubmit` or `--env`:
+
+   ```text
+   npm run setup -- --group <group-id>
+   forge deploy --non-interactive -e development
+   ```
+
+   Nothing is set unless every name and the group are found. The resubmit
+   transition is checked by the app on each ticket instead. To set the values
+   by hand, use the names exactly as they appear in the workflow (case and
+   outer spaces are ignored):
 
    ```text
    forge variables set APPROVAL_PROJECT_KEY SOC --environment development
-   forge variables set APPROVAL_ISSUE_TYPE_ID <issue-type-id> --environment development
-   forge variables set APPROVED_STATUS_ID <id> --environment development
-   forge variables set CHANGES_REQUESTED_STATUS_ID <id> --environment development
-   forge variables set RESUBMIT_TRANSITION_ID <id> --environment development
-   forge variables set APPROVER_ACCOUNT_IDS <accountId>[,<accountId>] --environment development
+   forge variables set APPROVAL_ISSUE_TYPE_NAME "Automation Request" --environment development
+   forge variables set APPROVED_STATUS_NAME Approved --environment development
+   forge variables set CHANGES_REQUESTED_STATUS_NAME "Change Request" --environment development
+   forge variables set RESUBMIT_TRANSITION_NAME "resubmit pending" --environment development
+   forge variables set APPROVER_GROUP_ID <group-id> --environment development
    ```
 
-   IDs rather than names, so renaming a status cannot silently break approvals.
-   `APPROVER_ACCOUNT_IDS` is checked in code as well as in the workflow: the
-   app reads the ticket's changelog to find who moved it to Approved, and
-   refuses an approval made before the latest draft version was stored. A
+   The app looks the IDs up on every call, so the same values work on any
+   site. A name that matches nothing, or matches two things, is refused by
+   variable name rather than guessed. Renaming a status or transition means
+   updating its variable (and redeploying, as for any Forge variable change).
+   See [ADR 0002](docs/adr/0002-approval-config-by-name-and-group.md).
+   The approver group is checked in code as well as in the workflow: the
+   app reads the ticket's changelog to find who moved it to Approved, checks
+   that person is in the group **at creation time**, and refuses an approval
+   made before the latest draft version was stored. A
    requester may approve their own request; the result comment labels this
    "self-approved". Rejected tickets need no variable: the app simply never
    creates anything for a ticket that is not Approved.
 
-The app needs the `read:jira-work`, `write:jira-work` and `storage:app` scopes,
+The app needs the `read:jira-work`, `read:jira-user` (approver group checks),
+`write:jira-work` and `storage:app` scopes,
 so after the first deploy with them the installation must be **upgraded**
 (`forge install --upgrade ...` below). A redeploy alone keeps the old
 permissions.
+
+## Manager notification (Teams)
+
+The manager gets a Teams card when an approval ticket is **ready**: the ticket
+exists and the draft JSON is attached. `draft-automation-rule` calls
+`src/mark-request-ready.js` right after the upload, so this never depends on
+the agent remembering a step. A ticket without an attachment is never marked.
+Revisions (Draft v2+) keep the labels and send nothing new.
+
+There are two paths. Both stay ready, and the Jira project property
+`request-notify-mode` on SOC picks one **on every call**:
+
+| Mode | What the app does | Who posts to Teams |
+|---|---|---|
+| `rule` (default; also used when the property is missing, invalid or unreadable) | adds `ready-for-review` | a Jira automation rule on SOC: trigger *labels changed*, JQL condition `labels = "ready-for-review" AND labels != "teams-notified"`, *Send web request* to the Power Automate flow, then add label `teams-notified` |
+| `webhook` | posts the card to the flow, then adds `ready-for-review` **and** `teams-notified` in one update | the app |
+
+Both labels go on in one update in webhook mode, so the Jira rule's
+`labels != "teams-notified"` check skips the ticket and nobody gets two
+messages. The rule's trigger still fires, so its audit log shows a run with
+no actions. That is expected.
+
+**Flip the switch** (no redeploy; needs SOC project admin):
+
+```text
+PUT https://api.atlassian.com/ex/jira/{cloudId}/rest/api/3/project/SOC/properties/request-notify-mode
+Content-Type: application/json
+
+"webhook"
+```
+
+The body is a JSON string, so the quotes are part of it. Send `"rule"` to
+switch back. The mode lives in a Jira property rather than a Forge variable
+because variable changes only take effect after a redeploy.
+
+**Arm webhook mode once.** Set the flow URL as an encrypted variable. It is
+the flow's password, so never put it in the repo, a ticket or chat. Then
+deploy and upgrade the install, because the manifest adds an egress host:
+
+```text
+forge variables set --encrypt -e development TEAMS_WEBHOOK_URL <flow-url>
+forge variables set -e development JIRA_SITE_URL https://<site>.atlassian.net
+forge lint
+forge deploy --non-interactive -e development
+forge install --non-interactive --upgrade --site <site>.atlassian.net --product jira --environment development
+```
+
+In webhook mode, if either variable is missing, the ticket is left
+unmarked and the draft message says so. If you settle on the rule path,
+remove the Power Automate egress entry from `manifest.yml` and redeploy, so
+the app cannot call Microsoft at all.
+
+**Things that bite:**
+- Jira's *Send web request* must send the header `Content-Type: application/json`.
+  Without it the flow rejects the call with a 400 about `application/octet-stream`.
+- The flow answers **202 Accepted** as soon as it queues the request. A green
+  result in Jira, or `marked: true` from the app, only means the flow **accepted**
+  it; it never proves Teams showed the card. Check the flow's run history in
+  Power Automate.
+- In rule mode the URL lives hidden inside the Jira rule, and it is lost when
+  the rule is exported or duplicated. Give the flow a co-owner so it survives
+  one person leaving.
+- In webhook mode a failed post adds no labels. If the post was accepted but
+  the label update failed, the result has `notificationSent: true` and the
+  app does **not** retry, because a retry would post twice.
+- **To retest** on the same ticket, remove **both** labels, then trigger a
+  new draft. The marker only runs inside `draft-automation-rule`.
+
+Out of scope: a second manager, approve/reject buttons on the card, and
+automatic fallback from webhook to rule.
 
 ## Deploy and connect the tool
 

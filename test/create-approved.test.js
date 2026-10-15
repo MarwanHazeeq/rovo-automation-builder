@@ -3,9 +3,9 @@ import test from 'node:test';
 import { createApprovedRuleActions, latestApproval } from '../src/create-approved.js';
 import { createDraftStore, DRAFT_STATES } from '../src/draft-store.js';
 import { digestRule } from '../src/draft-render.js';
-import { adfText, APPROVAL_ENV, fakeJira, fakeStorage, sampleRule } from './fakes.js';
+import { adfText, APPROVAL_ENV, APPROVAL_IDS, fakeJira, fakeStorage, sampleRule } from './fakes.js';
 
-const APPROVED = APPROVAL_ENV.APPROVED_STATUS_ID;
+const APPROVED = APPROVAL_IDS.approvedStatus;
 const PENDING_APPROVAL = '10200';
 
 // The draft is stored at DRAFT_AT; approvals in these tests happen after it
@@ -20,7 +20,7 @@ function liveIssue({ statusId = APPROVED, projectKey = 'AUTOAPR' } = {}) {
     key: 'AUTOAPR-7',
     fields: {
       project: { key: projectKey },
-      status: { id: statusId, name: statusId === APPROVED ? 'Approved' : 'Pending Approval' },
+      status: { id: statusId, name: statusId === APPROVED ? 'Approved' : 'Pending' },
       reporter: { accountId: 'me-1' },
     },
   };
@@ -43,9 +43,10 @@ async function setup({
   storage = fakeStorage(),
   issue = liveIssue(),
   changelog = [statusChange(APPROVED)],
+  jiraOverrides = {},
 } = {}) {
   const store = createDraftStore(storage);
-  const jira = fakeJira({ getIssue: () => issue, getChangelog: () => changelog });
+  const jira = fakeJira({ getIssue: () => issue, getChangelog: () => changelog, ...jiraOverrides });
   const createCalls = [];
   const createFn = async (record) => {
     createCalls.push(record);
@@ -176,18 +177,30 @@ test('a storage error before the claim is refused as retryable and creates nothi
 
 // --- approval checks from the changelog ---------------------------------------
 
-test('an approver outside APPROVER_ACCOUNT_IDS creates nothing and is recorded', async () => {
+test('an approver outside the approver group creates nothing and is recorded', async () => {
   const ctx = await setup({ changelog: [statusChange(APPROVED, { author: 'someone-else' })] });
   const result = await ctx.run();
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /not in APPROVER_ACCOUNT_IDS/);
+  assert.match(result.error, /not in the approver group \(someone-else\)/);
+  assert.deepEqual(ctx.jira.calls.isUserInGroup, [{ accountId: 'someone-else', groupId: APPROVAL_ENV.APPROVER_GROUP_ID }]);
   assert.equal(ctx.createCalls.length, 0);
   assert.equal((await ctx.store.getDraft('20001')).state, DRAFT_STATES.NEEDS_ATTENTION);
   assert.match(adfText(ctx.jira.calls.addComment[0].body), /Rule NOT created/);
 });
 
-test('being the assignee grants nothing: an allowlisted assignee does not excuse an unlisted approver', async () => {
+test('a failed group-membership read is retryable: nothing is created, recorded or commented', async () => {
+  const ctx = await setup({ jiraOverrides: { isUserInGroup: () => { throw new Error('HTTP 403'); } } });
+  const result = await ctx.run();
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /group membership could not be read \(HTTP 403\)\. Try again shortly/);
+  assert.equal(ctx.createCalls.length, 0);
+  assert.equal((await ctx.store.getDraft('20001')).state, DRAFT_STATES.PENDING);
+  assert.equal(ctx.jira.calls.addComment.length, 0);
+});
+
+test('being the assignee grants nothing: a group member as assignee does not excuse a non-member approver', async () => {
   const issue = liveIssue();
   issue.fields.assignee = { accountId: 'manager-1' };
   const ctx = await setup({ issue, changelog: [statusChange(APPROVED, { author: 'someone-else' })] });

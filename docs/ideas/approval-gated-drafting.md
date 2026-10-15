@@ -21,7 +21,7 @@ storage and attaches a redacted copy. A Teams message (sent by a plain Jira
 automation rule) tells the manager. When the ticket moves to **Approved**, a
 Jira automation rule wakes the agent (*Use Rovo agent*), which calls
 `create-approved-automation-rule` with only the ticket key. The app confirms
-the approval in the ticket's changelog (an allowlisted approver, after the
+the approval in the ticket's changelog (a member of the approver group, after the
 latest draft version), creates the frozen rule DISABLED, and posts the result
 as an app-authored comment. **Request Changes** wakes the agent the same way
 to revise and resubmit. **Reject** ends it.

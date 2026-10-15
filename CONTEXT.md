@@ -11,11 +11,11 @@ The person who asked the agent for a rule. They become the reporter of the Appro
 _Avoid_: user, author, submitter
 
 **Approver**:
-A person allowed to approve an Approval ticket, listed by account ID in the app's configuration.
+A person allowed to approve an Approval ticket: a member of the Jira group named by `APPROVER_GROUP_ID`.
 _Avoid_: manager (a role, not a permission), reviewer
 
 **Assignee**:
-The Approver the Approval ticket was sent to, so that they are notified. It grants nothing: only an Approver on the allowlist moving the ticket to Approved (per its changelog) authorises creation.
+Whoever holds the Approval ticket. The app sends no assignee, so Jira's project default applies. It grants nothing: only an Approver (a group member) moving the ticket to Approved (per its changelog) authorises creation.
 _Avoid_: owner, approver (when you mean the assignee)
 
 **Self-approval**:

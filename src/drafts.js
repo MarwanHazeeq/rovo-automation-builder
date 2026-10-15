@@ -1,8 +1,9 @@
 import { prepareRule, redactSecrets } from './index.js';
-import { readApprovalConfig } from './approval-config.js';
+import { findTransitionId, resolveApprovalConfig } from './approval-config.js';
 import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
 import { digestRule, renderDraftAttachment, renderDraftComment, withTicketPrefix } from './draft-render.js';
+import { createReadyMarker } from './mark-request-ready.js';
 
 /**
  * The two Rovo actions the agent is allowed to call. NEITHER creates a rule.
@@ -24,25 +25,24 @@ export function createDraftActions({
   store = createDraftStore(),
   prepare = prepareRule,
   getEnv = () => process.env,
+  // Marks the new ticket ready for the manager's Teams heads-up. Injected so
+  // tests can stub it; see src/mark-request-ready.js.
+  markReady = createReadyMarker({ jira, getEnv }).markRequestReady,
 } = {}) {
   return {
     /**
      * Rovo action `draft-automation-rule`.
      * Inputs: `ruleSpec` (JSON string, same contract as before), an
      * optional `requestSummary` (the agent's plain-language description,
-     * shown on the ticket and clearly labelled as the agent's words) and an
-     * optional `approverAccountId` (who the ticket is assigned to).
+     * shown on the ticket and clearly labelled as the agent's words).
+     * No assignee is sent, so Jira's project default assignee applies.
+     * Approvers are the members of the approver group, and any of them may
+     * pick the ticket up.
      */
     async draftAutomationRule(payload, invocationContext) {
-      const configResult = readApprovalConfig(getEnv());
+      const configResult = await resolveApprovalConfig(jira, getEnv());
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
-
-      // 0. Decide who the ticket is assigned to, BEFORE anything is created,
-      //    so a bad approver never leaves a half-made ticket behind.
-      const routing = chooseApprover(payload?.approverAccountId, config.approverAccountIds);
-      if (!routing.ok) return draftFailure(routing.error);
-      const approverAccountId = routing.accountId;
 
       // 1. Build and validate. Nothing is created; the only network call is
       //    the read-only field-metadata lookup.
@@ -57,9 +57,6 @@ export function createDraftActions({
           issuetype: { id: config.issueTypeId },
           summary: truncate(`Automation rule request: ${prepared.rule.name}`, 250),
           description: describeRequest(payload?.requestSummary),
-          // Set in the same request (not a separate assign call afterwards)
-          // so the Teams "Issue created" rule already sees the assignee.
-          ...(approverAccountId ? { assignee: { accountId: approverAccountId } } : {}),
         });
       } catch (error) {
         return draftFailure(`The approval ticket could not be created: ${error.message}`);
@@ -82,9 +79,6 @@ export function createDraftActions({
         // create action falls back to the ticket's reporter.
         requesterAccountId:
           invocationContext?.principal?.accountId ?? payload?.context?.accountId ?? null,
-        // Audit only: who the ticket was sent to. Nothing reads this to decide
-        // anything; the create action checks Jira's changelog instead.
-        approverAccountId,
         history: [],
       };
       record.history.push({ version: 1, digest: record.digest, state: record.state, at: new Date().toISOString() });
@@ -107,6 +101,11 @@ export function createDraftActions({
       //    still stored correctly, so say so rather than failing.
       const warning = await postDraftArtifacts(jira, issue.key, record);
 
+      // 5. Now the ticket exists and the draft is attached: mark it ready so
+      //    the manager gets the Teams heads-up. Only first submissions are
+      //    marked; a revision keeps the labels and sends nothing new.
+      const readyForReview = await markReady(issue.key, config.projectKey);
+
       return {
         ok: true,
         ruleCreated: false,
@@ -114,16 +113,13 @@ export function createDraftActions({
         issueKey: issue.key,
         version: 1,
         digest: record.digest,
-        assignedTo: approverAccountId,
         ...(warning ? { warning } : {}),
+        readyForReview,
         // Rendered by code. The agent should relay this, not paraphrase it.
         message:
-          `Draft v1 of "${rule.name}" was submitted for approval as ${issue.key}` +
-          (approverAccountId
-            ? ` and assigned to approver ${approverAccountId}. `
-            : ', unassigned: assign it to an approver so they are notified. ') +
+          `Draft v1 of "${rule.name}" was submitted for approval as ${issue.key}. ` +
           'No automation rule has been created. It can be created, DISABLED, only after ' +
-          `${issue.key} is approved.`,
+          `${issue.key} is approved. ${describeReadiness(issue.key, readyForReview)}`,
       };
     },
 
@@ -135,7 +131,7 @@ export function createDraftActions({
      * present; every Jira call here is made as the app.
      */
     async reviseAutomationRuleDraft(payload) {
-      const configResult = readApprovalConfig(getEnv());
+      const configResult = await resolveApprovalConfig(jira, getEnv());
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
 
@@ -172,7 +168,7 @@ export function createDraftActions({
 
       const rule = withTicketPrefix(prepared.rule, issue.key);
       const version = existing.version + 1;
-      // Save BEFORE moving the ticket back to Pending Approval, so by the time
+      // Save BEFORE moving the ticket back to Pending, so by the time
       // the manager can approve, the stored draft is already the new version.
       const updated = await store.applyEvent(existing, 'revise', {
         rule,
@@ -185,10 +181,18 @@ export function createDraftActions({
       const warning = await postDraftArtifacts(jira, issue.key, updated);
 
       try {
-        await jira.transitionIssue(issue.key, config.resubmitTransitionId);
+        // Transitions depend on the ticket's current status, so the resubmit
+        // transition is looked up by name on the ticket itself.
+        const transition = findTransitionId(
+          await jira.getTransitions(issue.key),
+          config.resubmitTransitionName,
+          issue.key
+        );
+        if (!transition.ok) throw new Error(transition.error);
+        await jira.transitionIssue(issue.key, transition.id);
       } catch (error) {
         return draftFailure(
-          `Draft v${version} was stored, but ${issue.key} could not be moved back to Pending Approval: ` +
+          `Draft v${version} was stored, but ${issue.key} could not be moved back to Pending: ` +
             `${error.message}. Use the Resubmit transition on the ticket manually.`,
           { issueKey: issue.key, version, draftStored: true }
         );
@@ -231,6 +235,22 @@ function draftFailure(message, extra = {}) {
 }
 
 /**
+ * The sentence about the manager's heads-up, rendered by code so the agent
+ * cannot overstate it. "Accepted by the flow" is the most this app can know;
+ * whether Teams showed the card is only visible in Power Automate.
+ */
+function describeReadiness(issueKey, ready) {
+  if (ready?.marked || ready?.alreadyMarked) {
+    return 'It is marked ready for review; the manager heads-up was handed to the notification flow ' +
+      "(delivery to Teams can't be confirmed here).";
+  }
+  const reason = `It could NOT be marked ready for review (${ready?.error ?? 'unknown error'}).`;
+  return ready?.notificationSent
+    ? `${reason} A heads-up may already have been sent; check with the approver about ${issueKey}.`
+    : `${reason} No heads-up was triggered: tell the approver about ${issueKey}.`;
+}
+
+/**
  * Attach the redacted draft JSON to the ticket, then post the "Draft vN"
  * comment that names the file. The attachment goes first so the comment can
  * say truthfully whether it is there.
@@ -261,33 +281,6 @@ async function postDraftArtifacts(jira, issueKey, record) {
   return warnings.length
     ? `The draft was stored, but on ${issueKey} ${warnings.join(' and ')}.`
     : null;
-}
-
-/**
- * Who to assign the approval ticket to.
- *
- * The agent finds the manager's account ID with Rovo's Jira user search, so
- * the value is the agent's word: it is accepted only if it is on
- * APPROVER_ACCOUNT_IDS. With no value and exactly one approver configured,
- * that approver is used; with several, the ticket is left unassigned rather
- * than guessing. Being the assignee grants nothing: the create action
- * authorises from the changelog, not from this.
- */
-function chooseApprover(requested, approverAccountIds) {
-  const accountId = typeof requested === 'string' ? requested.trim() : '';
-  if (accountId === '') {
-    return { ok: true, accountId: approverAccountIds.length === 1 ? approverAccountIds[0] : null };
-  }
-  if (!approverAccountIds.includes(accountId)) {
-    // Deliberately does not list the allowed IDs back to the agent.
-    return {
-      ok: false,
-      error:
-        `Account ${accountId} is not an allowed approver, so no approval ticket was raised. ` +
-        'Ask the user to confirm their approver, or ask a Jira admin to add them to APPROVER_ACCOUNT_IDS.',
-    };
-  }
-  return { ok: true, accountId };
 }
 
 /** Ticket description: the agent's summary, labelled as such. */

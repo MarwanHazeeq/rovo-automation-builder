@@ -44,14 +44,6 @@ modules:
           description: |
             One or two plain sentences describing what the user asked for.
             Shown on the approval ticket, labelled as the agent's summary.
-        approverAccountId:
-          title: Approver account ID
-          type: string
-          required: false
-          description: |
-            Atlassian account ID of the user's approver, found with Jira user
-            search. The ticket is assigned to them. Must be an allowed
-            approver, or no ticket is raised.
     - key: revise-automation-rule-draft
       name: Revise automation rule draft
       function: revise-draft-function
@@ -137,8 +129,13 @@ permissions:
     fetch:
       backend:
         - address: https://api.atlassian.com
+        # Power Automate flow for the manager's Teams heads-up (webhook mode of
+        # src/mark-request-ready.js). Host only: the secret is in the URL's
+        # query, kept in the encrypted TEAMS_WEBHOOK_URL variable.
+        - address: https://defaulte1f8fe1a47bf4ac3a40795451346d5.4b.environment.api.powerplatform.com
   scopes:
-    - read:jira-work # read approval ticket status and changelog
+    - read:jira-work # read approval ticket status, changelog, project workflow statuses and transitions
+    - read:jira-user # check the approver is in the APPROVER_GROUP_ID group
     - write:jira-work # create approval ticket, comment, attach draft, resubmit transition
     - storage:app # Forge KVS: frozen drafts and creation claims
 

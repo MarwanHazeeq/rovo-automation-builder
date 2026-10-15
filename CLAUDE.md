@@ -9,12 +9,13 @@ A Rovo `rovo:mcp` tool server with four actions:
   and attaches a redacted copy to the ticket.
 - `revise-automation-rule-draft` replaces the draft after the manager picks Request Changes.
 - `create-approved-automation-rule` takes ONLY an issue key. Once the ticket is Approved by an
-  allowlisted approver (checked in the ticket's changelog), it creates the frozen draft
+  approver in the `APPROVER_GROUP_ID` group (checked in the ticket's changelog), it creates the frozen draft
   **DISABLED**, GETs it back to verify, and comments the result.
 - `get-component-reference` serves the verified component shapes so the agent stops inventing them.
 
-Teams notification and the headless revise/create calls are Jira automation rules on SOC
-("Use Rovo agent"), not app code. No UI; one egress host (`api.atlassian.com`). Target site
+The Teams heads-up is a Jira rule fired by the app's `ready-for-review` label, or posted by
+the app itself in webhook mode. The headless revise/create calls are Jira automation rules on
+SOC ("Use Rovo agent"), not app code. No UI; egress to `api.atlassian.com` and the Power Automate flow host. Target site
 project: SOCAIAutomation (key `SOC`, `projectId` 10086), which also holds the approval tickets. Design: `docs/ideas/approval-gated-drafting.md`,
 decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CONTEXT.md`.
 
@@ -37,9 +38,14 @@ decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CO
   machine (`nextState`) and the atomic creation claim. `src/draft-render.js` - ADF comments,
   the redacted attachment and the rule digest. `src/jira-client.js` - Jira REST (`.asUser()`
   for ticket creation, `.asApp()` otherwise). `src/approval-config.js` - approval env vars.
+- `src/mark-request-ready.js` - called by `draft-automation-rule` after the attachment: labels the
+  ticket `ready-for-review` (rule mode) or posts the Teams card and adds both labels (webhook
+  mode), switched by the SOC project property `request-notify-mode`. Not a Rovo action.
 - `src/component-library.js` - **single source of truth** for component `value` shapes.
   Its header has the "HOW TO ADD A NEW TYPE" procedure.
 - `src/component-reference.js` - handler for `get-component-reference`; reads the library.
+- `scripts/setup-approval-vars.js` - `npm run setup -- --group <id>`: checks the approval
+  names and group on the site (login from `.env`), then runs `forge variables set`.
 - `test/*.test.js` - one file per concern. `test/fakes.js` has the in-memory KVS / Jira fakes.
 - `docs/ideas/approval-gated-drafting.md` - current design. `agent-trust-boundary.md` is superseded.
 - `docs/rovo-agent-instructions.md` - the agent's Rovo Studio instructions (kept in sync by hand).
@@ -63,7 +69,7 @@ decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CO
 5. Secrets in exports are replaced with `<PLACEHOLDER>`. Never commit, log or echo tokens.
 6. Rules are created ONLY by the `create-approved-automation-rule` action
    (`src/create-approved.js`), which takes an issue key, never rule content, and creates the
-   draft frozen in KVS after an allowlisted approver's move to Approved that postdates the
+   draft frozen in KVS after an approver-group member's move to Approved that postdates the
    draft. Never add an input carrying rule content to it, and never add a second create path.
 7. Creation is guarded by the `FAIL_IF_EXISTS` claim in `draftStore.claimCreation`. Never
    POST a rule without winning it, and never retry after it (report on the ticket instead).
@@ -77,8 +83,8 @@ variables `AUTOMATION_API_EMAIL` / `AUTOMATION_API_TOKEN` rather than `.asUser()
 Spike S1/S6 is investigating making the rule actor the requesting user instead.
 
 Jira REST calls for the approval flow do use Forge auth (scopes `read:jira-work`,
-`write:jira-work`, `storage:app`): `.asUser()` to create the approval ticket so the
-requester is the reporter, `.asApp()` for comments, attachments, status and changelog reads
+`read:jira-user`, `write:jira-work`, `storage:app`): `.asUser()` to create the approval ticket so the
+requester is the reporter, `.asApp()` for comments, attachments, status, changelog, workflow and group reads
 and the resubmit transition (headless "Use Rovo agent" calls have no user). `.asApp()` grants
 the caller nothing: creation is authorised by the ticket's changelog, not by who asked.
 
@@ -87,9 +93,10 @@ the caller nothing: creation is authorised by the ticket's changelog, not by who
 - `avi:jira:transitioned:issue` does not exist. A trigger built on it silently never fires.
 - Adding a scope or egress entry needs redeploy **and then** reinstall.
 - Rovo action `description` is capped at 255 characters (`forge lint` catches it).
-- The ticket's assignee is only who is notified. Never read it in the approval check;
-  `create-approved` authorises from the changelog author + `APPROVER_ACCOUNT_IDS`.
-- Approval tickets use status/transition **IDs** from Forge variables (see README), never names.
+- The app sends no assignee (Jira's project default applies). Never read the assignee in the approval check;
+  `create-approved` authorises from the changelog author's membership of `APPROVER_GROUP_ID`.
+- Approval config holds issue type/status/transition **names**; `resolveApprovalConfig` turns
+  them into IDs per call and refuses 0 or >1 matches. Compare IDs in code, never names.
 - Forge `requestJira` bodies are `string | ArrayBuffer | URLSearchParams` only (no `FormData`),
   so `addAttachment` builds the multipart body by hand. Jira needs `X-Atlassian-Token: no-check`.
 - Redaction writes `[redacted]` (`redactSecrets`); `<PLACEHOLDER>` is only for sample exports.
