@@ -9,6 +9,15 @@
  * the single source of truth for component value shapes; the copy in the
  * project docs is a mirror for humans, not an input to the app.
  *
+ * `example` IS THE INPUT CONTRACT. It is what the agent copies, so it must be
+ * the shape buildRulePayload (index.js) ACCEPTS, not the shape Jira exports.
+ * For a type the builder assembles itself (triggers, jira.issue.edit,
+ * jira.issue.condition, the web request action) the exported shape differs
+ * from the accepted one: record the export shape under `builtInternally`,
+ * which is served to the agent as "what the builder produces, do not send".
+ * test/component-contract.test.js feeds every `example` through
+ * buildRulePayload, so an entry that documents an export shape fails CI.
+ *
  * WHY THIS FILE EXISTS
  * Atlassian does not publish a schema for automation component `value`
  * objects. Per Atlassian support: "the component identifier must be
@@ -52,13 +61,19 @@ const TRIGGER_LIBRARY = {
     schemaVersion: 1,
     description: 'Run when a work item is created in the scoped project.',
     source: 'Accepted rule schema/structure, Auto-Triage.txt',
-    example: {
-      eventKey: 'jira:issue_created',
-      issueEvent: 'issue_created',
-      eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
+    example: {},
+    builtInternally: {
+      description:
+        'NOT something to send. The builder produces this value; it is recorded as evidence of the exported shape.',
+      value: {
+        eventKey: 'jira:issue_created',
+        issueEvent: 'issue_created',
+        eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
+      },
     },
     notes:
-      'index.js builds eventFilters from the rule scope -- do not supply it. The API accepts many ' +
+      'The trigger takes no settings: send just { "type": "jira.issue.event.trigger:created" }. ' +
+      'index.js builds eventFilters from the rule scope. The API accepts many ' +
       'project ARIs here (Auto-Triage.txt uses seven); index.js deliberately permits exactly one.',
   },
 
@@ -67,11 +82,19 @@ const TRIGGER_LIBRARY = {
     description: 'Run when a work item moves between statuses. Filterable by source and destination.',
     source: 'index.js TRIGGER_BUILDERS',
     example: {
-      eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
       fromStatus: ['Open'],
       toStatus: [],
-      eventKey: 'jira:issue_updated',
-      issueEvent: 'issue_generic',
+    },
+    builtInternally: {
+      description:
+        'NOT something to send. The builder produces this value; eventFilters, eventKey and issueEvent are never supplied.',
+      value: {
+        eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
+        fromStatus: ['Open'],
+        toStatus: [],
+        eventKey: 'jira:issue_updated',
+        issueEvent: 'issue_generic',
+      },
     },
     notes:
       'Supply fromStatus / toStatus as arrays of status NAMES on the trigger; an empty array means ' +
@@ -85,10 +108,18 @@ const TRIGGER_LIBRARY = {
     description: 'Run when one of the named fields changes.',
     source: 'index.js TRIGGER_BUILDERS',
     example: {
-      eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
       changeType: 'ANY_CHANGE',
-      fields: [{ value: 'Response Time', type: 'fieldName' }],
-      actions: ['edit'],
+      fields: ['Response Time'],
+    },
+    builtInternally: {
+      description:
+        'NOT something to send. The builder produces this value; eventFilters, actions and the { value, type } field wrappers are never supplied.',
+      value: {
+        eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
+        changeType: 'ANY_CHANGE',
+        fields: [{ value: 'Response Time', type: 'fieldName' }],
+        actions: ['edit'],
+      },
     },
     notes: 'Supply trigger.fields as an array of field-name strings; index.js wraps each one.',
   },
@@ -101,19 +132,35 @@ const TRIGGER_LIBRARY = {
       'container component (there is none on the allowlist).',
     source: 'BulkUpdate.txt (Historical_Time to First Response)',
     example: {
-      schedule: {
-        cronExpression: '',
-        method: 'BASIC',
-        rate: 0,
-        rateInterval: 86400,
-        rRule:
-          'BEGIN:VEVENT\nDTSTART;TZID=Asia/Singapore:20260925T153700\n' +
-          'RRULE:FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;BYDAY=MO;INTERVAL=1\n' +
-          'END:VEVENT\n',
-      },
       jql: '"Response Time" is EMPTY',
-      executionMode: 'jql',
+      schedule: {
+        frequency: 'WEEKLY',
+        days: ['MO'],
+        hour: 9,
+        minute: 0,
+        timezone: 'Asia/Singapore',
+        interval: 1,
+      },
       onlyUpdatedIssues: false,
+    },
+    builtInternally: {
+      description:
+        'NOT something to send. The builder produces this value from the schedule above, including the iCal rRule and the vestigial cron/rate fields.',
+      value: {
+        schedule: {
+          cronExpression: '',
+          method: 'BASIC',
+          rate: 0,
+          rateInterval: 86400,
+          rRule:
+            'BEGIN:VEVENT\nDTSTART;TZID=Asia/Singapore:20260925T153700\n' +
+            'RRULE:FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0;BYSECOND=0;BYDAY=MO;INTERVAL=1\n' +
+            'END:VEVENT\n',
+        },
+        jql: '"Response Time" is EMPTY',
+        executionMode: 'jql',
+        onlyUpdatedIssues: false,
+      },
     },
     notes:
       'IMPLEMENTED in index.js TRIGGER_BUILDERS. Takes { jql, schedule: { days, hour, minute, ' +
@@ -191,7 +238,6 @@ const ACTION_LIBRARY = {
       urlSecure: false,
       headers: [
         { id: '_header_1758073141366', name: 'Content-Type', value: 'application/json', headerSecure: false },
-        { id: '_header_1758254318457', name: 'Authorization', value: '<PLACEHOLDER_SET_VIA_VARIABLE_OR_SECRET>', headerSecure: false },
       ],
       sendIssue: false,
       contentType: 'custom',
@@ -199,8 +245,15 @@ const ACTION_LIBRARY = {
       method: 'POST',
       responseEnabled: true,
       continueOnErrorEnabled: true,
+      authenticate: true,
     },
     notes:
+      'NEVER send an Authorization header: the builder rejects it. Set "authenticate": true instead and it ' +
+      'adds an Authorization header holding a placeholder (REPLACE_ME_BEFORE_ENABLING) for a human to ' +
+      'replace in the Automation UI before enabling the rule; omit it if the endpoint needs no auth. ' +
+      'authenticate is this app\'s own flag and is removed from the stored value. Only url is required: ' +
+      'urlSecure, sendIssue, responseEnabled and continueOnErrorEnabled default as in the example, ' +
+      'contentType defaults to "empty" and method to "GET". ' +
       'contentType "custom" pairs with customBody (a string, JSON or form-encoded, built from smart values). ' +
       'contentType "empty" (see the TRIGGER_BUILDERS defaults elsewhere) sends no body. ' +
       'Each header needs its own generated id, same free-form style as jira.create.variable\'s id. ' +
@@ -253,91 +306,110 @@ const ACTION_LIBRARY = {
 
   'jira.issue.edit': {
     schemaVersion: 12,
-    description: 'Edit one or more fields on the issue. Three verified shapes -- pick one per action, never mix them.',
+    description:
+      'Edit one or more fields on the issue. Send value.fields; the builder looks each field up on the ' +
+      'tenant and writes the Jira payload itself.',
     source: 'Sample Integration Automation + Sample Calculation Automation + BulkUpdate.txt',
-    variants: {
-      operations: {
-        description:
-          'Use this for a straightforward SET on a small number of fields, referenced by NAME with an ' +
-          'explicit fieldType. Look the fieldType up in field-type-index.js -- do not guess it.',
-        example: {
-          operations: [
-            {
-              field: { type: 'NAME', value: 'Customer ITSM Incident' },
-              fieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:textfield',
-              type: 'SET',
-              value: '{{webhookResponse.body.request.id}}',
-            },
-          ],
-          advancedFields: null,
-          sendNotifications: true,
-        },
+    example: {
+      fields: {
+        'Escalated to Customer': 'Yes',
+        customfield_11594: '{{#=}}ROUND({{issue.customfield_11594|0}} + 1, 2){{/}}',
       },
-      operationsFloat: {
-        description:
-          'A FLOAT (numeric) field set through the operations form, with the value carrying a ' +
-          '{{#=}} math expression as a plain string. This supersedes the previous note in ' +
-          'index.js and in payload-library-guide.md that float fields must go through ' +
-          'advancedFields -- a rule running on this tenant does it through operations.',
-        source: 'BulkUpdate.txt (Historical_Time to First Response)',
-        example: {
-          operations: [
-            {
-              field: { type: 'NAME', value: 'Response Time' },
-              fieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:float',
-              type: 'SET',
-              value: '{{#=}}ROUND({{issue.customfield_10049.ongoingCycle.elapsedTime.millis}} / 60000, 1){{/}}',
-            },
-          ],
-          advancedFields: null,
-          sendNotifications: true,
+    },
+    notes:
+      'INPUT CONTRACT: value.fields is an object mapping a field NAME or field ID to the value, or an ' +
+      'array of { name or fieldId, value } entries. Do NOT send "operations" or "advancedFields": the ' +
+      'builder rejects them and builds them itself from the tenant\'s field metadata. Supported field ' +
+      'types: single-select and text (written as operations), and float/number (written as ' +
+      'advancedFields; the value may be a number, a smart value or a {{#=}} math expression, and the ' +
+      'builder adds the {{#=}} wrapper when needed). System fields (labels, issuetype, priority, ...) ' +
+      'are NOT supported and throw. A field name that matches several fields throws; send the ' +
+      'customfield_NNNNN ID instead. sendNotifications defaults to true; send false to opt out. ' +
+      'To change fields together with a status change, use jira.issue.transition, whose operations ' +
+      'array IS sent as shown there.',
+    builtInternally: {
+      description:
+        'NOT AN INPUT. These are the payloads the builder PRODUCES from value.fields, kept as evidence of ' +
+        'what Jira exports and of which field types are supported. Sending any of them directly is rejected.',
+      shapes: {
+        operations: {
+          description:
+            'Produced for a plain SET on a text or single-select field: referenced by NAME with an ' +
+            'explicit fieldType.',
+          example: {
+            operations: [
+              {
+                field: { type: 'NAME', value: 'Customer ITSM Incident' },
+                fieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:textfield',
+                type: 'SET',
+                value: '{{webhookResponse.body.request.id}}',
+              },
+            ],
+            advancedFields: null,
+            sendNotifications: true,
+          },
         },
-        notes:
-          'CORRECTION: index.js already handles float fields -- buildRulePayload routes them to the ' +
-          'advancedFields variant below (and isSafeJiraNumericExpression already permits ROUND(x, n)), ' +
-          'so float edits are NOT broken and need no change. This operations form is an alternative ' +
-          'the tenant proves is valid, not a fix. It produces a smaller payload for a plain SET and ' +
-          'renders in the Automation UI\'s normal field editor rather than the advanced JSON box. ' +
-          'advancedFields remains the route for a read-modify-write increment keyed by field ID, ' +
-          'which is what the phase-field accumulation needs.',
-      },
-      operationsSystemField: {
-        description:
-          'A SYSTEM field (labels, issuetype, priority, ...) rather than a custom field. These are ' +
-          'referenced by ID, their fieldType is the bare field id rather than a ' +
-          'customfieldtypes:* class, and a multi-value field takes an ARRAY of { type, value }.',
-        source: 'Auto-Triage.txt (labels set during a transition)',
-        example: {
-          operations: [
-            {
-              field: { type: 'ID', value: 'labels' },
-              fieldType: 'labels',
-              type: 'SET',
-              value: [{ type: 'NAME', value: 'suspicious-activity' }],
-            },
-          ],
-          advancedFields: null,
-          sendNotifications: true,
+        operationsFloat: {
+          description:
+            'Exported form of a FLOAT (numeric) field set through operations, with the value carrying a ' +
+            '{{#=}} math expression as a plain string. A rule running on this tenant does it this way, ' +
+            'but the builder PRODUCES the advancedFields form below for float fields.',
+          source: 'BulkUpdate.txt (Historical_Time to First Response)',
+          example: {
+            operations: [
+              {
+                field: { type: 'NAME', value: 'Response Time' },
+                fieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:float',
+                type: 'SET',
+                value: '{{#=}}ROUND({{issue.customfield_10049.ongoingCycle.elapsedTime.millis}} / 60000, 1){{/}}',
+              },
+            ],
+            advancedFields: null,
+            sendNotifications: true,
+          },
+          notes:
+            'buildRulePayload routes float fields to the advancedFields shape below (and ' +
+            'isSafeJiraNumericExpression permits ROUND(x, n)). This operations form is evidence the ' +
+            'tenant accepts it, not an input: sending it is rejected.',
         },
-        notes:
-          'index.js CANNOT build this yet: findJiraField + EDIT_OPERATION_VALUE_BUILDERS key on ' +
-          'jiraField.schema.custom, which system fields do not have (they carry schema.system), so ' +
-          'any attempt to edit labels or issuetype throws "not on the verified list". Adding it means ' +
-          'a schema.system branch and a per-field builder, since the value shape differs by field ' +
-          '(array for labels, likely scalar for priority) -- export one per field before adding it.',
-      },
-      advancedFields: {
-        description:
-          'Use this for arithmetic/expression edits the operations form cannot express, in particular ' +
-          'incrementing a number field by a computed amount. advancedFields is a JSON-shaped STRING ' +
-          '(not a nested object) using smart-value template syntax, keyed by field ID.',
-        example: {
-          operations: [],
-          advancedFields:
-            '{\n  "fields": {\n    "customfield_11594": {{#=}}{{issue.customfield_11594|0}} + {{minutesToAdd|0}}{{/}}\n  }\n}',
-          sendNotifications: false,
+        operationsSystemField: {
+          description:
+            'A SYSTEM field (labels, issuetype, priority, ...) rather than a custom field. These are ' +
+            'referenced by ID, their fieldType is the bare field id rather than a ' +
+            'customfieldtypes:* class, and a multi-value field takes an ARRAY of { type, value }.',
+          source: 'Auto-Triage.txt (labels set during a transition)',
+          example: {
+            operations: [
+              {
+                field: { type: 'ID', value: 'labels' },
+                fieldType: 'labels',
+                type: 'SET',
+                value: [{ type: 'NAME', value: 'suspicious-activity' }],
+              },
+            ],
+            advancedFields: null,
+            sendNotifications: true,
+          },
+          notes:
+            'The builder CANNOT produce this yet: findJiraField + EDIT_OPERATION_VALUE_BUILDERS key on ' +
+            'jiraField.schema.custom, which system fields do not have (they carry schema.system), so ' +
+            'any attempt to edit labels or issuetype throws "not on the verified list". Adding it means ' +
+            'a schema.system branch and a per-field builder, since the value shape differs by field ' +
+            '(array for labels, likely scalar for priority) -- export one per field before adding it.',
         },
-        notes: 'Keys inside advancedFields use the field ID (customfield_NNNNN), not the display name.',
+        advancedFields: {
+          description:
+            'Produced for float/number fields, which covers arithmetic such as incrementing by a computed ' +
+            'amount. advancedFields is a JSON-shaped STRING (not a nested object) using smart-value ' +
+            'template syntax, keyed by field ID.',
+          example: {
+            operations: [],
+            advancedFields:
+              '{\n  "fields": {\n    "customfield_11594": {{#=}}{{issue.customfield_11594|0}} + {{minutesToAdd|0}}{{/}}\n  }\n}',
+            sendNotifications: false,
+          },
+          notes: 'Keys inside advancedFields use the field ID (customfield_NNNNN), not the display name.',
+        },
       },
     },
   },
@@ -398,28 +470,45 @@ const CONDITION_LIBRARY = {
     description: 'Check a specific issue field\'s value against a comparison. More structured than the comparator condition.',
     source: 'Sample Integration Automation',
     example: {
-      selectedField: { type: 'NAME', value: 'Send to Customer ITSM' },
-      selectedFieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:select',
+      name: 'Send to Customer ITSM',
+      value: 'Yes',
       comparison: 'EQUALS',
-      compareValue: { type: 'NAME', modifier: null, value: 'Yes', multiValue: false, source: null },
-    },
-    systemFieldExample: {
-      source: 'Auto-Triage.txt (issue type equals Incident)',
-      value: {
-        selectedField: { type: 'ID', value: 'issuetype' },
-        selectedFieldType: 'issuetype',
-        comparison: 'EQUALS',
-        compareValue: { type: 'ID', modifier: null, value: '10001', multiValue: false, source: null },
-      },
-      notes:
-        'System fields use type "ID" on BOTH selectedField and compareValue, a bare selectedFieldType, ' +
-        'and the numeric entity id as compareValue.value -- not the display name.',
     },
     notes:
-      'selectedFieldType must match the field\'s actual type from field-type-index.js. Verified for ' +
-      'custom select fields (NAME-based, above) and system fields (ID-based, see systemFieldExample). ' +
-      'A different custom field type (textfield, number, ...) may need another compareValue shape; ' +
-      'export one before using this condition on it. Only EQUALS is verified.',
+      'INPUT CONTRACT: { name, value, comparison? } -- the field\'s display name and the value to compare ' +
+      'it with. The builder looks the field up on the tenant and writes selectedField, selectedFieldType ' +
+      'and compareValue itself; do not send those. Only single-select custom fields and the EQUALS ' +
+      'comparison are supported. System fields (issuetype, priority, ...) and other custom field types ' +
+      'throw; for those, use a jira.comparator.condition on a smart value instead.',
+    builtInternally: {
+      description:
+        'NOT AN INPUT. These are the payloads the builder PRODUCES (or, for system fields, cannot yet ' +
+        'produce), kept as evidence of the exported shape.',
+      shapes: {
+        customSelectField: {
+          source: 'Sample Integration Automation',
+          value: {
+            selectedField: { type: 'NAME', value: 'Send to Customer ITSM' },
+            selectedFieldType: 'com.atlassian.jira.plugin.system.customfieldtypes:select',
+            comparison: 'EQUALS',
+            compareValue: { type: 'NAME', modifier: null, value: 'Yes', multiValue: false, source: null },
+          },
+        },
+        systemField: {
+          source: 'Auto-Triage.txt (issue type equals Incident)',
+          value: {
+            selectedField: { type: 'ID', value: 'issuetype' },
+            selectedFieldType: 'issuetype',
+            comparison: 'EQUALS',
+            compareValue: { type: 'ID', modifier: null, value: '10001', multiValue: false, source: null },
+          },
+          notes:
+            'System fields use type "ID" on BOTH selectedField and compareValue, a bare selectedFieldType, ' +
+            'and the numeric entity id as compareValue.value -- not the display name. The builder cannot ' +
+            'produce this yet (it keys on schema.custom).',
+        },
+      },
+    },
   },
 };
 

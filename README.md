@@ -279,7 +279,7 @@ Automation API JSON. A minimal specification looks like this:
 ```json
 {
   "name": "Notify on priority changes",
-  "projectId": "10001",
+  "projectName": "SOCDemo",
   "trigger": {
     "type": "jira.issue.field.changed",
     "fields": ["priority"],
@@ -295,7 +295,7 @@ Automation API JSON. A minimal specification looks like this:
   }],
   "actions": [{
     "type": "codebarrel.action.log",
-    "value": {"text": "Priority is low"}
+    "value": "Priority is low"
   }]
 }
 ```
@@ -305,8 +305,10 @@ field-change triggers; comparator and issue conditions; and the verified
 variable, log, webhook, wait, transition, edit, entity-property, refresh,
 mapping-variable, and comment actions. A document can contain the business
 request in any prose format; the agent's job is to populate this small
-specification. The `projectId` still needs to be identifiable in the
-prompt/document or supplied by the agent from Jira context.
+specification. The project is named by its display name in `projectName`; the app looks it
+up with the Jira project search and refuses a name that matches no project or
+more than one. A numeric `projectId` is still accepted (older drafts); if both
+are sent they must be the same project.
 
 ### Jira number fields and decimal minutes
 

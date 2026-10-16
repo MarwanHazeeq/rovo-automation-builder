@@ -438,7 +438,16 @@ export async function prepareRule(payload) {
         console.log(`[createJiraAutomationRule] fetched ${fieldMetadata.length} Jira field(s)`);
       }
 
-      requestBody = buildRulePayload(parsed, configuredCloudId, actorAccountId, fieldMetadata);
+      // The agent sends a project NAME; the numeric id is resolved here so
+      // the agent never has to handle (or guess) a number.
+      const projectId = await resolveProjectId(parsed, configuredCloudId, email, token);
+
+      requestBody = buildRulePayload(
+        { ...parsed, projectId },
+        configuredCloudId,
+        actorAccountId,
+        fieldMetadata
+      );
     } catch (error) {
       return failure(`ruleSpec could not be converted into a rule: ${error.message}`);
     }
@@ -633,6 +642,131 @@ async function fetchJiraFieldMetadata(cloudId, email, token) {
   }
 
   return body;
+}
+
+// A short query such as "SOC" can match many projects by substring, so the
+// search is paged. The cap stops a runaway loop; hitting it is an error, not a
+// guess, because an unseen page might hold a second exact-name match.
+const PROJECT_SEARCH_PAGE_SIZE = 50;
+const PROJECT_SEARCH_MAX_PAGES = 10;
+// How many candidate names an error lists. The agent relays them to the
+// requester, so a few real options help and a wall of names does not.
+const PROJECT_ERROR_CANDIDATE_LIMIT = 10;
+
+/**
+ * Decide which numeric project id a ruleSpec means. Exactly one of
+ * `projectName` / `projectId` must be present. `projectId` is still accepted
+ * (existing drafts, tests) and is validated later by buildRulePayload. When
+ * both are present they must resolve to the same project; neither is
+ * preferred, because a silent pick is how a rule lands in the wrong project.
+ */
+async function resolveProjectId(spec, cloudId, email, token) {
+  const isPresent = (value) => value !== undefined && value !== null && value !== '';
+  const hasId = isPresent(spec.projectId);
+  const hasName = isPresent(spec.projectName);
+
+  if (!hasId && !hasName) {
+    throw new Error(
+      'ruleSpec needs projectName, the Jira project\'s display name (e.g. "SOCDemo"). ' +
+        'Neither projectName nor projectId was provided.'
+    );
+  }
+  if (!hasName) return spec.projectId;
+
+  const projectName = nonEmptyString(spec.projectName, 'projectName');
+  const resolvedId = await findProjectIdByName(projectName, cloudId, email, token);
+
+  if (hasId && String(spec.projectId).trim() !== resolvedId) {
+    throw new Error(
+      `projectId "${String(spec.projectId).trim()}" and projectName "${projectName}" are different ` +
+        `projects (the name resolves to project id ${resolvedId}). Send only projectName.`
+    );
+  }
+  return resolvedId;
+}
+
+/**
+ * Look a project up by exact display name. The search endpoint's `query` is a
+ * SUBSTRING match on name and key, so its response is a candidate list: the
+ * exact-name filter below is what makes this an answer. Zero or several exact
+ * matches throw, naming real options so the agent can report them.
+ */
+async function findProjectIdByName(projectName, cloudId, email, token) {
+  const auth = Buffer.from(`${email}:${token}`).toString('base64');
+  const wanted = projectName.trim().toLowerCase();
+  const candidates = [];
+  let reachedLastPage = false;
+
+  for (let page = 0; page < PROJECT_SEARCH_MAX_PAGES && !reachedLastPage; page += 1) {
+    const url =
+      `${JIRA_SITE_API_BASE}/${cloudId}/rest/api/3/project/search` +
+      `?query=${encodeURIComponent(projectName)}` +
+      `&startAt=${candidates.length}&maxResults=${PROJECT_SEARCH_PAGE_SIZE}`;
+    console.log(`[findProjectIdByName] GET ${url}`);
+    let response;
+    let body;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+      });
+      body = await readJsonOrText(response);
+    } catch (error) {
+      throw new Error(`Project search request failed: ${error.message}`);
+    }
+    if (response.status !== 200 || !body || !Array.isArray(body.values)) {
+      throw new Error(
+        `Project search returned status ${response.status}; expected a 200 with a "values" array.`
+      );
+    }
+
+    candidates.push(...body.values);
+    // Trust isLast, fall back to total, and stop on an empty page so a
+    // response missing both can never loop forever.
+    reachedLastPage =
+      body.isLast === true ||
+      (Number.isFinite(body.total) && candidates.length >= body.total) ||
+      body.values.length === 0;
+  }
+
+  if (!reachedLastPage) {
+    throw new Error(
+      `projectName "${projectName}" matched too many projects to check (more than ` +
+        `${candidates.length}). Send the project's full, exact name.`
+    );
+  }
+
+  const matches = candidates.filter(
+    (project) =>
+      project && typeof project.name === 'string' && project.name.trim().toLowerCase() === wanted
+  );
+
+  if (matches.length === 1) return String(matches[0].id);
+
+  if (matches.length === 0) {
+    const names = candidates
+      .map((project) => project?.name)
+      .filter((name) => typeof name === 'string');
+    const listed = names.slice(0, PROJECT_ERROR_CANDIDATE_LIMIT).join(', ');
+    const more = names.length > PROJECT_ERROR_CANDIDATE_LIMIT
+      ? ` (first ${PROJECT_ERROR_CANDIDATE_LIMIT} of ${names.length})`
+      : '';
+    throw new Error(
+      `projectName "${projectName}" matched no project. ` +
+        (names.length > 0
+          ? `Projects the search returned${more}: ${listed}. `
+          : 'The search returned no projects. ') +
+        'Send the exact project name.'
+    );
+  }
+
+  const listed = matches
+    .map((project) => `${project.name} (key ${project.key}, id ${project.id})`)
+    .join('; ');
+  throw new Error(
+    `projectName "${projectName}" matches more than one project: ${listed}. ` +
+      'Ask the requester which one they mean; do not pick one.'
+  );
 }
 
 /**
@@ -1735,4 +1869,15 @@ function safeStringify(value) {
 
 // Helpers shared with the draft/approval modules. They are pure functions;
 // exporting them keeps one implementation of digesting and redaction.
-export { canonicalJson, sha256, redactSecrets, walkComponents, failure, safeStringify };
+export {
+  canonicalJson,
+  sha256,
+  redactSecrets,
+  walkComponents,
+  failure,
+  safeStringify,
+  buildRulePayload,
+  ALLOWED_TRIGGER_TYPES,
+  ALLOWED_ACTION_TYPES,
+  ALLOWED_CONDITION_TYPES,
+};

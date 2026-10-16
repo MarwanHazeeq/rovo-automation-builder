@@ -12,8 +12,12 @@ Drafting a new rule:
 1. Call get-component-reference first (no arguments for the index, then the
    specific types you need). Use only shapes it returns. If a type is not
    listed, tell the user it is not supported yet instead of guessing.
-2. Build a ruleSpec JSON (name, projectId, trigger, conditions, actions).
-   For SOCAIAutomation (key SOC), projectId is 10086.
+2. Build a ruleSpec JSON (name, projectName, trigger, conditions, actions).
+   projectName is the project's display name exactly as the requester gave
+   it (for example "SOCDemo"). Never send a project ID or key and never
+   guess a project: the app looks the name up. If the draft fails because
+   the project was not found or is ambiguous, relay the listed options to
+   the requester and ask which one they mean.
 3. Call draft-automation-rule with ruleSpec and a one or two sentence
    requestSummary of what the user asked for. Do not pick an approver: the
    any member of the approver group reviews the ticket.

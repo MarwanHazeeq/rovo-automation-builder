@@ -31,20 +31,28 @@ test('a component type returns its full shape and schema version', async () => {
   assert.equal(result.kind, 'action');
   assert.equal(result.schemaVersion, 12);
   assert.equal(result.verified, true);
-  // All three edit shapes must be reachable, or the agent picks the wrong one.
-  assert.deepEqual(Object.keys(result.variants).sort(), [
+  // The documented example is the INPUT the builder accepts: value.fields.
+  assert.deepEqual(Object.keys(result.example), ['fields']);
+  // The exported operations / advancedFields shapes stay reachable, but only
+  // as clearly labelled builder output, never as the example to copy.
+  assert.equal('variants' in result, false);
+  assert.match(result.builtInternally.description, /NOT AN INPUT/);
+  assert.deepEqual(Object.keys(result.builtInternally.shapes).sort(), [
     'advancedFields', 'operations', 'operationsFloat', 'operationsSystemField',
   ]);
 });
 
-test('the scheduled trigger shape carries the vestigial schedule fields', async () => {
+test('the scheduled trigger keeps the vestigial schedule fields as builder output', async () => {
   const result = await getComponentReference({ componentType: 'jira.jql.scheduled' });
 
   assert.equal(result.ok, true);
   assert.equal(result.kind, 'trigger');
-  assert.equal(result.example.schedule.method, 'BASIC');
-  assert.equal(result.example.schedule.rateInterval, 86400);
-  assert.equal(result.example.executionMode, 'jql');
+  // `example` is what the agent sends; the vestigial fields are builder output.
+  assert.equal(result.example.schedule.method, undefined);
+  assert.equal(result.example.executionMode, undefined);
+  assert.equal(result.builtInternally.value.schedule.method, 'BASIC');
+  assert.equal(result.builtInternally.value.schedule.rateInterval, 86400);
+  assert.equal(result.builtInternally.value.executionMode, 'jql');
   assert.match(result.notes, /IMPLEMENTED in index\.js/);
 });
 

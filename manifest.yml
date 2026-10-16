@@ -22,9 +22,9 @@ modules:
           type: string
           required: true
           description: |
-            JSON extracted from the user's prompt or attached document. For
-            SOCAIAutomation (SOC), projectId must be 10086. Use name, projectId, trigger,
-            conditions, and actions. For the issue-created trigger, include the
+            JSON extracted from the user's prompt or attached document. Use
+            name, projectName (the project's display name, e.g. "SOCDemo"; never
+            a number or key), trigger, conditions, and actions. For the issue-created trigger, include the
             UI-captured events array as trigger.events. The action assembles
             the API payload and always disables the created rule. Numeric float
             custom fields can be set using a finite number, a Jira smart value,
@@ -65,8 +65,7 @@ modules:
           required: true
           description: |
             The complete revised ruleSpec JSON, in the same format as for
-            draft-automation-rule (not a diff). For SOCAIAutomation (SOC), projectId
-            must be 10086.
+            draft-automation-rule (not a diff), including projectName.
     - key: create-approved-automation-rule
       name: Create approved automation rule
       function: create-approved-fn

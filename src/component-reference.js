@@ -60,8 +60,7 @@ function detail(kind, type, entry) {
   };
   for (const key of [
     'example',
-    'variants',
-    'systemFieldExample',
+    'builtInternally',
     'verifiedOperators',
     'verifiedMatchTypes',
     'notes',
