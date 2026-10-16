@@ -50,7 +50,7 @@ const SITE_URL =
   'https://logicalisasia.atlassian.net/rest/api/3/issue/GSC-1/changelog?startAt=0&maxResults=1';
 
 test('builds a web request with no Authorization header and both flags on', async () => {
-  const { result, createdRule } = await buildRule({ url: SITE_URL });
+  const { result, createdRule } = await buildRule({ url: SITE_URL, method: 'GET' });
 
   assert.equal(result.ok, true);
   const value = createdRule.components[0].value;
@@ -62,7 +62,7 @@ test('builds a web request with no Authorization header and both flags on', asyn
 });
 
 test('tells the caller the credential is a required manual step', async () => {
-  const { result } = await buildRule({ url: SITE_URL });
+  const { result } = await buildRule({ url: SITE_URL, method: 'GET' });
 
   assert.equal(result.ok, true);
   assert.match(result.manualStepRequired, /NO Authorization header/);
@@ -107,6 +107,7 @@ test('a rule with no web request carries no manual-step note', async () => {
 test('refuses a caller-supplied Authorization header rather than stripping it silently', async () => {
   const { result } = await buildRule({
     url: SITE_URL,
+    method: 'GET',
     headers: [
       { id: '_h1', name: 'Authorization', value: 'Basic SGFsbG8gdGhlcmU=', headerSecure: false },
     ],
@@ -129,7 +130,7 @@ test('refuses a lowercase authorization header too', async () => {
 });
 
 test('authenticate:true inserts a masked placeholder, never a credential', async () => {
-  const { result, createdRule } = await buildRule({ url: SITE_URL, authenticate: true });
+  const { result, createdRule } = await buildRule({ url: SITE_URL, method: 'GET', authenticate: true });
 
   assert.equal(result.ok, true);
   const headers = createdRule.components[0].value.headers;
@@ -143,14 +144,14 @@ test('authenticate:true inserts a masked placeholder, never a credential', async
 });
 
 test('the placeholder is called out as the step blocking enablement', async () => {
-  const { result } = await buildRule({ url: SITE_URL, authenticate: true });
+  const { result } = await buildRule({ url: SITE_URL, method: 'GET', authenticate: true });
 
   assert.match(result.manualStepRequired, /REPLACE_ME_BEFORE_ENABLING/);
   assert.match(result.manualStepRequired, /before enabling the rule/);
 });
 
 test('without the flag no Authorization header is added at all', async () => {
-  const { createdRule } = await buildRule({ url: SITE_URL });
+  const { createdRule } = await buildRule({ url: SITE_URL, method: 'GET' });
   assert.equal(createdRule.components[0].value.headers.length, 0);
 });
 
@@ -202,7 +203,7 @@ test('a failure response never echoes rule headers back to the agent', async () 
         name: 'Changelog read',
         projectId: '10449',
         trigger: { type: 'jira.issue.event.trigger:created' },
-        actions: [{ type: 'jira.issue.outgoing.webhook', value: { url: SITE_URL } }],
+        actions: [{ type: 'jira.issue.outgoing.webhook', value: { url: SITE_URL, method: 'GET' } }],
       }),
     });
 

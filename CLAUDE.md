@@ -38,6 +38,8 @@ decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CO
   machine (`nextState`) and the atomic creation claim. `src/draft-render.js` - ADF comments,
   the redacted attachment and the rule digest. `src/jira-client.js` - Jira REST (`.asUser()`
   for ticket creation, `.asApp()` otherwise). `src/approval-config.js` - approval env vars.
+- `src/request-checks.js` - code-side refusals for `draft-automation-rule`: `requestText` required,
+  `BRANCH_WORDS` (a request with "otherwise" etc. needs more than one branch).
 - `src/mark-request-ready.js` - called by `draft-automation-rule` after the attachment: labels the
   ticket `ready-for-review` (rule mode) or posts the Teams card and adds both labels (webhook
   mode), switched by the SOC project property `request-notify-mode`. Not a Rovo action.

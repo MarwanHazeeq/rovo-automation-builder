@@ -41,6 +41,15 @@ const FIELD_METADATA = [
   },
 ];
 
+// Every schedule field the requester must state; none has a default.
+const FULL_SCHEDULE = {
+  frequency: 'WEEKLY',
+  days: ['MO'],
+  hour: 9,
+  minute: 0,
+  timezone: 'Asia/Singapore',
+};
+
 function mockResponse(status, body) {
   return {
     status,
@@ -248,6 +257,7 @@ test('builds a scheduled JQL trigger with no eventFilters and a generated rRule'
         type: 'jira.jql.scheduled',
         jql: '"Response Time" is EMPTY',
         schedule: {
+          frequency: 'WEEKLY',
           days: ['MO'],
           hour: 9,
           minute: 0,
@@ -333,19 +343,19 @@ test('rejects a scheduled trigger with a missing jql or an invalid schedule', as
     })
   );
 
-  const noJql = await build({ schedule: { days: ['MO'] } });
+  const noJql = await build({ schedule: FULL_SCHEDULE });
   assert.equal(noJql.ok, false);
   assert.match(noJql.error, /trigger\.jql/);
 
-  const badDay = await build({ jql: 'status = Open', schedule: { days: ['FUNDAY'] } });
+  const badDay = await build({ jql: 'status = Open', schedule: { ...FULL_SCHEDULE, days: ['FUNDAY'] } });
   assert.equal(badDay.ok, false);
   assert.match(badDay.error, /unrecognized day/);
 
-  const badHour = await build({ jql: 'status = Open', schedule: { hour: 25 } });
+  const badHour = await build({ jql: 'status = Open', schedule: { ...FULL_SCHEDULE, hour: 25 } });
   assert.equal(badHour.ok, false);
   assert.match(badHour.error, /hour must be an integer between 0 and 23/);
 
-  const badZone = await build({ jql: 'status = Open', schedule: { timezone: 'Mars/Olympus' } });
+  const badZone = await build({ jql: 'status = Open', schedule: { ...FULL_SCHEDULE, timezone: 'Mars/Olympus' } });
   assert.equal(badZone.ok, false);
   assert.match(badZone.error, /not a recognized IANA time zone/);
 
@@ -396,7 +406,7 @@ test('verification rejects a scheduled rule whose JQL came back rewritten', asyn
       trigger: {
         type: 'jira.jql.scheduled',
         jql: '"Response Time" is EMPTY',
-        schedule: { days: ['MO'] },
+        schedule: FULL_SCHEDULE,
       },
       actions: [{ type: 'codebarrel.action.log', value: 'x' }],
     }),
@@ -563,4 +573,62 @@ test('createAndVerifyRule re-validates a stored rule and never POSTs one that is
   assert.equal(result.ok, false);
   assert.match(result.error, /DISABLED/);
   assert.equal(posted, false);
+});
+
+test('a scheduled trigger missing a schedule value throws, in the requester\'s words', async () => {
+  const build = (schedule) => withForgeEnvironment(
+    async () => mockResponse(201, { ruleUuid: 'should-not-be-created' }),
+    () => createJiraAutomationRule({
+      ruleSpec: JSON.stringify({
+        name: 'Unscheduled rule',
+        projectId: '10878',
+        trigger: { type: 'jira.jql.scheduled', jql: 'status = Open', schedule },
+        actions: [{ type: 'codebarrel.action.log', value: 'x' }],
+      }),
+    })
+  );
+
+  const { timezone, ...noZone } = FULL_SCHEDULE;
+  const { hour, ...noHour } = FULL_SCHEDULE;
+  const { days, ...noDays } = FULL_SCHEDULE;
+  const { frequency, ...noFrequency } = FULL_SCHEDULE;
+  const cases = [
+    [undefined, /did not say when the rule should run/],
+    [noZone, /did not say which time zone/],
+    [noHour, /did not say what hour of the day/],
+    [noDays, /did not say which day\(s\) of the week/],
+    [noFrequency, /did not say how often/],
+  ];
+  for (const [schedule, message] of cases) {
+    const result = await build(schedule);
+    assert.equal(result.ok, false);
+    assert.match(result.error, message);
+  }
+});
+
+test('a web request without an HTTP method throws and a complete one is created DISABLED', async () => {
+  let createdRule;
+  const run = (value) => withForgeEnvironment(async (url, options = {}) => {
+    if (options.method === 'POST') {
+      createdRule = JSON.parse(options.body).rule;
+      return mockResponse(201, { ruleUuid: 'created-rule-id' });
+    }
+    return mockResponse(200, { rule: createdRule });
+  }, () => createJiraAutomationRule({
+    ruleSpec: JSON.stringify({
+      name: 'Web request',
+      projectId: '10878',
+      trigger: { type: 'jira.issue.event.trigger:created' },
+      actions: [{ type: 'jira.issue.outgoing.webhook', value }],
+    }),
+  }));
+
+  const missing = await run({ url: 'https://example.test/hook' });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /did not say which HTTP method/);
+
+  const complete = await run({ url: 'https://example.test/hook', method: 'post' });
+  assert.equal(complete.ok, true);
+  assert.equal(createdRule.state, 'DISABLED');
+  assert.equal(createdRule.components[0].value.method, 'POST');
 });

@@ -53,11 +53,14 @@ export function createReadyMarker({
   /**
    * Mark `issueKey` ready for review. `projectKey` is the approval project
    * (APPROVAL_PROJECT_KEY); tickets anywhere else are refused.
+   * `targetProject` is the human-readable project the rule would be created
+   * in; it goes on the webhook-mode Teams card. In rule mode the card is built
+   * by the Jira rule outside this repo, which must add the line itself.
    *
    * Never throws: every outcome is a result object, because the caller has
    * already raised the ticket and must not fail because of the heads-up.
    */
-  async function markRequestReady(issueKey, projectKey) {
+  async function markRequestReady(issueKey, projectKey, { targetProject } = {}) {
     // The base result. Every return below fills in what actually happened.
     const result = {
       ok: false,
@@ -125,6 +128,7 @@ export function createReadyMarker({
       issueKey,
       summary: issue.fields.summary,
       requestedBy: issue.fields.reporter?.displayName,
+      targetProject,
       siteUrl: String(env.JIRA_SITE_URL).trim(),
     });
     const posted = await postCard(String(env.TEAMS_WEBHOOK_URL).trim(), card);
@@ -231,7 +235,7 @@ export function createReadyMarker({
  * Teams Workflows' "Post card in a chat or channel" expects. Built as an
  * object and serialised once, never by string concatenation.
  */
-export function buildCard({ issueKey, summary, requestedBy, siteUrl }) {
+export function buildCard({ issueKey, summary, requestedBy, targetProject, siteUrl }) {
   return {
     type: 'message',
     attachments: [
@@ -247,6 +251,9 @@ export function buildCard({ issueKey, summary, requestedBy, siteUrl }) {
             {
               type: 'FactSet',
               facts: [
+                // The target project goes first: it is the one thing the
+                // manager must check, and the app cannot verify it.
+                { title: 'Target project', value: String(targetProject ?? 'unknown') },
                 { title: 'Ticket', value: issueKey },
                 { title: 'Summary', value: String(summary ?? '') },
                 { title: 'Requested by', value: String(requestedBy ?? 'unknown') },

@@ -23,8 +23,11 @@ Drafting a new rule:
    guess a project: the app looks the name up. If the draft fails because
    the project was not found or is ambiguous, relay the listed options to
    the requester and ask which one they mean.
-3. Call draft-automation-rule with ruleSpec and a one or two sentence
-   requestSummary of what the user asked for. Do not pick an approver: the
+3. Call draft-automation-rule with ruleSpec, requestText (the requester's
+   message copied exactly, never paraphrased) and a one or two sentence
+   requestSummary of what the user asked for. If the call is refused because
+   the request describes more than one case, ask the requester what happens
+   in each case and send one branch for each; do not drop the wording. Do not pick an approver: the
    any member of the approver group reviews the ticket.
 4. Relay the returned `message` (or `summary` on failure) to the user
    word for word. A draft is not a rule: never say a rule was created,

@@ -4,6 +4,7 @@ import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
 import { digestRule, renderDraftAttachment, renderDraftComment, withTicketPrefix } from './draft-render.js';
 import { createReadyMarker } from './mark-request-ready.js';
+import { checkBranchesMatchRequest, checkRequestText, countBranches } from './request-checks.js';
 
 /**
  * The two Rovo actions the agent is allowed to call. NEITHER creates a rule.
@@ -32,8 +33,9 @@ export function createDraftActions({
   return {
     /**
      * Rovo action `draft-automation-rule`.
-     * Inputs: `ruleSpec` (JSON string, same contract as before), an
-     * optional `requestSummary` (the agent's plain-language description,
+     * Inputs: `ruleSpec` (JSON string, same contract as before), the
+     * required `requestText` (the requester's message as sent, kept on the
+     * ticket as an audit trail), an optional `requestSummary` (the agent's plain-language description,
      * shown on the ticket and clearly labelled as the agent's words).
      * No assignee is sent, so Jira's project default assignee applies.
      * Approvers are the members of the approver group, and any of them may
@@ -44,10 +46,23 @@ export function createDraftActions({
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
 
+      // 0. The requester's own words are required. This is an audit trail,
+      //    not a gate: the agent writes it, so it proves nothing alone. Its
+      //    value is that the approver can compare it with what was built.
+      const requestTextError = checkRequestText(payload?.requestText);
+      if (requestTextError) return draftFailure(requestTextError);
+      const requestText = payload.requestText.trim();
+
       // 1. Build and validate. Nothing is created; the only network call is
       //    the read-only field-metadata lookup.
       const prepared = await prepare(payload);
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared });
+
+      // A request that describes several cases cannot be flattened into one
+      // branch holding every action: the agent must use ruleSpec.branches or
+      // go back to the requester.
+      const branchError = checkBranchesMatchRequest(requestText, countBranches(prepared.rule));
+      if (branchError) return draftFailure(branchError);
 
       // 2. Raise the approval ticket AS THE USER, so they are the reporter.
       let issue;
@@ -56,7 +71,11 @@ export function createDraftActions({
           project: { key: config.projectKey },
           issuetype: { id: config.issueTypeId },
           summary: truncate(`Automation rule request: ${prepared.rule.name}`, 250),
-          description: describeRequest(payload?.requestSummary),
+          description: describeRequest({
+            requestSummary: payload?.requestSummary,
+            requestText,
+            project: describeProject(prepared),
+          }),
         });
       } catch (error) {
         return draftFailure(`The approval ticket could not be created: ${error.message}`);
@@ -72,6 +91,7 @@ export function createDraftActions({
         state: DRAFT_STATES.PENDING,
         rule,
         scope: prepared.scope,
+        requestText,
         digest: digestRule(rule),
         // Where Rovo puts the invoking user's accountId is still open (spike
         // S1): the docs say the handler's second argument carries
@@ -104,7 +124,9 @@ export function createDraftActions({
       // 5. Now the ticket exists and the draft is attached: mark it ready so
       //    the manager gets the Teams heads-up. Only first submissions are
       //    marked; a revision keeps the labels and sends nothing new.
-      const readyForReview = await markReady(issue.key, config.projectKey);
+      const readyForReview = await markReady(issue.key, config.projectKey, {
+        targetProject: describeProject(prepared),
+      });
 
       return {
         ok: true,
@@ -165,6 +187,17 @@ export function createDraftActions({
 
       const prepared = await prepare(payload);
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared, issueKey });
+
+      // The project line at the top of the ticket was written for v1. A
+      // revision that moves the rule to another project would leave the
+      // approver reading the wrong one, so a new request is needed instead.
+      if (prepared.scope !== existing.scope) {
+        return draftFailure(
+          `The revised draft targets a different project than ${issueKey} was approved for. ` +
+            'Keep the original project, or raise a new request for the other one.',
+          { issueKey }
+        );
+      }
 
       const rule = withTicketPrefix(prepared.rule, issue.key);
       const version = existing.version + 1;
@@ -283,8 +316,23 @@ async function postDraftArtifacts(jira, issueKey, record) {
     : null;
 }
 
-/** Ticket description: the agent's summary, labelled as such. */
-function describeRequest(requestSummary) {
+/**
+ * "SOCDemo (project ID 10449)" - the project the rule will be created in. The
+ * app cannot check the requester named it, so the manager must see it before
+ * approving, which is the last point at which a wrong project costs nothing.
+ */
+function describeProject(prepared) {
+  const projectId = /project\/(\d+)$/.exec(prepared.scope ?? '')?.[1] ?? 'unknown';
+  return prepared.projectName
+    ? `${prepared.projectName} (project ID ${projectId})`
+    : `project ID ${projectId}`;
+}
+
+/**
+ * Ticket description. The target project is the FIRST line, above everything
+ * else, then the requester's message as sent, then the agent's summary.
+ */
+function describeRequest({ requestSummary, requestText, project }) {
   const summary = typeof requestSummary === 'string' && requestSummary.trim() !== ''
     ? truncate(requestSummary.trim(), 5000)
     : '(no summary supplied)';
@@ -292,6 +340,13 @@ function describeRequest(requestSummary) {
     type: 'doc',
     version: 1,
     content: [
+      { type: 'paragraph', content: [
+        { type: 'text', text: 'Target project: ', marks: [{ type: 'strong' }] },
+        { type: 'text', text: project },
+      ] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'Check this is the project the requester named before approving.' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'Requester\'s message, as sent by the agent:', marks: [{ type: 'strong' }] }] },
+      { type: 'paragraph', content: [{ type: 'text', text: truncate(requestText, 5000) }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'Request as described by the agent (not authoritative):', marks: [{ type: 'strong' }] }] },
       { type: 'paragraph', content: [{ type: 'text', text: summary }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'The authoritative draft is the latest "Draft vN" comment, written by the app.' }] },

@@ -54,7 +54,7 @@ function setup({ issue = ticket(), mode, modeError, env = {}, fetchImpl, addLabe
     return fetchImpl ? fetchImpl(url, init) : new Response(null, { status: 202 });
   };
   const { markRequestReady } = createReadyMarker({ jira, fetchFn, getEnv: () => env, timeoutMs: 50 });
-  return { jira, posts, mark: () => markRequestReady('SOC-145', 'SOC'), markRequestReady };
+  return { jira, posts, mark: () => markRequestReady('SOC-145', 'SOC', { targetProject: 'SOCDemo (project ID 10086)' }), markRequestReady };
 }
 
 /** Capture console output during `fn`, so tests can check what was logged. */
@@ -177,6 +177,7 @@ test('webhook mode posts the card as JSON with an explicit content type', async 
   assert.equal(content.body[0].text, 'Automation request ready for review');
   assert.equal(content.body[0].weight, 'Bolder');
   assert.deepEqual(content.body[1].facts, [
+    { title: 'Target project', value: 'SOCDemo (project ID 10086)' },
     { title: 'Ticket', value: 'SOC-145' },
     { title: 'Summary', value: 'Notify on "P1" \\ urgent' },
     { title: 'Requested by', value: 'Requester One' },

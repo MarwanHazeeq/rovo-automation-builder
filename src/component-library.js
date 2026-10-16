@@ -163,8 +163,9 @@ const TRIGGER_LIBRARY = {
       },
     },
     notes:
-      'IMPLEMENTED in index.js TRIGGER_BUILDERS. Takes { jql, schedule: { days, hour, minute, ' +
-      'timezone, startDate, interval, frequency } } and owns the iCal encoding, because an RRULE is ' +
+      'IMPLEMENTED in index.js TRIGGER_BUILDERS. Takes { jql, schedule: { frequency, days, hour, minute, ' +
+      'timezone, startDate?, interval? } }. frequency, hour, minute and timezone are REQUIRED (days too for ' +
+      'WEEKLY): a missing one is refused, never defaulted, so ask the requester. It owns the iCal encoding, because an RRULE is ' +
       'the kind of transport detail an LLM gets wrong silently -- BulkUpdate.txt was described as a ' +
       'Monday rule but carries BYDAY=MO,TU,WE,TH,FR. A complete VEVENT string is accepted as an ' +
       'escape hatch. Adding the trigger also required gating TWO eventFilters checks (pre-send ' +
@@ -251,9 +252,10 @@ const ACTION_LIBRARY = {
       'NEVER send an Authorization header: the builder rejects it. Set "authenticate": true instead and it ' +
       'adds an Authorization header holding a placeholder (REPLACE_ME_BEFORE_ENABLING) for a human to ' +
       'replace in the Automation UI before enabling the rule; omit it if the endpoint needs no auth. ' +
-      'authenticate is this app\'s own flag and is removed from the stored value. Only url is required: ' +
+      'authenticate is this app\'s own flag and is removed from the stored value. url and method are required ' +
+      '(a missing method is refused, never guessed as GET: ask the requester): ' +
       'urlSecure, sendIssue, responseEnabled and continueOnErrorEnabled default as in the example, ' +
-      'contentType defaults to "empty" and method to "GET". ' +
+      'contentType defaults to "empty". ' +
       'contentType "custom" pairs with customBody (a string, JSON or form-encoded, built from smart values). ' +
       'contentType "empty" (see the TRIGGER_BUILDERS defaults elsewhere) sends no body. ' +
       'Each header needs its own generated id, same free-form style as jira.create.variable\'s id. ' +

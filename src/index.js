@@ -26,6 +26,7 @@ const TRIGGER_BUILDERS = {
       }
       return {
         eventFilters: [scope],
+        // OPTIONAL on purpose: "when <field> changes" means ANY change to it.
         changeType: trigger.changeType || trigger.value?.changeType || 'ANY_CHANGE',
         fields: triggerFields.map((field) => ({
           value: normalizeTriggerFieldName(field),
@@ -55,6 +56,8 @@ const TRIGGER_BUILDERS = {
       const triggerValue = trigger.value || {};
       const fromStatus = trigger.fromStatus ?? triggerValue.fromStatus;
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
+      // OPTIONAL on purpose: an empty list means "any status". Either filter
+      // alone ("to Done") is a normal request. Do not remove.
       return {
         eventFilters: [scope],
         fromStatus: Array.isArray(fromStatus) ? fromStatus : [],
@@ -407,6 +410,9 @@ export async function prepareRule(payload) {
   }
 
   let requestBody;
+  // Display name of the target project, for the approval ticket. Null when
+  // the spec carried only an id (or a full payload was pasted).
+  let projectName = null;
   console.log(
     `[createJiraAutomationRule] parsed input as ${isFullRulePayload(parsed) ? 'a full rule payload' : 'a rule specification'}`
   );
@@ -443,10 +449,11 @@ export async function prepareRule(payload) {
 
       // The agent sends a project NAME; the numeric id is resolved here so
       // the agent never has to handle (or guess) a number.
-      const projectId = await resolveProjectId(parsed, configuredCloudId, email, token);
+      const project = await resolveProjectId(parsed, configuredCloudId, email, token);
+      projectName = project.name;
 
       requestBody = buildRulePayload(
-        { ...parsed, projectId },
+        { ...parsed, projectId: project.id },
         configuredCloudId,
         actorAccountId,
         fieldMetadata
@@ -463,7 +470,7 @@ export async function prepareRule(payload) {
   if (!allowlistCheck.ok) return failure(allowlistCheck.error);
 
   const { cloudId, rule, scope } = validation;
-  return { ok: true, rule, scope, cloudId };
+  return { ok: true, rule, scope, cloudId, projectName };
 }
 
 /**
@@ -674,10 +681,11 @@ async function resolveProjectId(spec, cloudId, email, token) {
         'Neither projectName nor projectId was provided.'
     );
   }
-  if (!hasName) return spec.projectId;
+  if (!hasName) return { id: spec.projectId, name: null };
 
   const projectName = nonEmptyString(spec.projectName, 'projectName');
-  const resolvedId = await findProjectIdByName(projectName, cloudId, email, token);
+  const { id: resolvedId, name: resolvedName } =
+    await findProjectIdByName(projectName, cloudId, email, token);
 
   if (hasId && String(spec.projectId).trim() !== resolvedId) {
     throw new Error(
@@ -685,7 +693,7 @@ async function resolveProjectId(spec, cloudId, email, token) {
         `projects (the name resolves to project id ${resolvedId}). Send only projectName.`
     );
   }
-  return resolvedId;
+  return { id: resolvedId, name: resolvedName };
 }
 
 /**
@@ -744,7 +752,7 @@ async function findProjectIdByName(projectName, cloudId, email, token) {
       project && typeof project.name === 'string' && project.name.trim().toLowerCase() === wanted
   );
 
-  if (matches.length === 1) return String(matches[0].id);
+  if (matches.length === 1) return { id: String(matches[0].id), name: matches[0].name };
 
   if (matches.length === 0) {
     const names = candidates
@@ -919,7 +927,6 @@ function isSafeJiraNumericExpression(expression) {
 
 const RRULE_WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
 const RRULE_FREQUENCIES = ['DAILY', 'WEEKLY'];
-const DEFAULT_SCHEDULE_TIMEZONE = 'Asia/Singapore';
 
 /**
  * Build the iCal VEVENT string a jira.jql.scheduled trigger expects.
@@ -947,18 +954,40 @@ function buildScheduleRRule(schedule) {
     return raw.endsWith('\n') ? raw : `${raw}\n`;
   }
 
-  const config = schedule && typeof schedule === 'object' ? schedule : {};
+  // No schedule, or no frequency / time of day / time zone, used to be filled
+  // in with a weekly Monday 09:00 Asia/Singapore rule that nobody chose. When
+  // the requester has not said WHEN the rule runs, the agent must ask.
+  if (!schedule || typeof schedule !== 'object' || Array.isArray(schedule)) {
+    throw new Error(
+      'The requester did not say when the rule should run. Ask how often (daily or weekly), ' +
+        'at what time, and in which time zone, then send trigger.schedule.'
+    );
+  }
+  const config = schedule;
 
-  const frequency = String(config.frequency || 'WEEKLY').toUpperCase();
+  if (config.frequency === undefined || config.frequency === null || config.frequency === '') {
+    throw new Error(
+      `The requester did not say how often the rule should run. Ask whether it is ${RRULE_FREQUENCIES.join(' or ')}.`
+    );
+  }
+  const frequency = String(config.frequency).toUpperCase();
   if (!RRULE_FREQUENCIES.includes(frequency)) {
     throw new Error(`trigger.schedule.frequency must be one of ${RRULE_FREQUENCIES.join(', ')}.`);
   }
 
-  const hour = scheduleInteger(config.hour, 'hour', 0, 23, 9);
-  const minute = scheduleInteger(config.minute, 'minute', 0, 59, 0);
+  const hour = requiredScheduleInteger(config.hour, 'hour', 0, 23, 'what hour of the day');
+  const minute = requiredScheduleInteger(config.minute, 'minute', 0, 59, 'at what minute past the hour');
+  // OPTIONAL on purpose: an interval of 1 means "every day / every week",
+  // which is what a requester who names no interval means. Do not remove.
   const interval = scheduleInteger(config.interval, 'interval', 1, 52, 1);
 
-  const timezone = config.timezone || DEFAULT_SCHEDULE_TIMEZONE;
+  if (typeof config.timezone !== 'string' || config.timezone.trim() === '') {
+    throw new Error(
+      'The requester did not say which time zone the schedule uses. Ask for it ' +
+        '(for example "Asia/Singapore"); a schedule without a time zone could run hours off.'
+    );
+  }
+  const timezone = config.timezone.trim();
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: timezone });
   } catch {
@@ -967,7 +996,12 @@ function buildScheduleRRule(schedule) {
 
   let days = [];
   if (frequency === 'WEEKLY') {
-    const requested = config.days ?? config.byDay ?? ['MO'];
+    const requested = config.days ?? config.byDay;
+    if (requested === undefined || requested === null || requested === '') {
+      throw new Error(
+        'The requester did not say which day(s) of the week a weekly rule runs. Ask which days.'
+      );
+    }
     days = (Array.isArray(requested) ? requested : [requested])
       .map((day) => String(day).trim().toUpperCase().slice(0, 2));
     if (days.length === 0) {
@@ -1006,6 +1040,15 @@ function pad2(value) {
   return String(value).padStart(2, '0');
 }
 
+// Like scheduleInteger, but a missing value throws: hour and minute have no
+// sensible default, and a rule that runs at a time nobody chose is a bug.
+function requiredScheduleInteger(value, name, min, max, question) {
+  if (value === undefined || value === null || value === '') {
+    throw new Error(`The requester did not say ${question} the rule should run. Ask, then send trigger.schedule.${name}.`);
+  }
+  return scheduleInteger(value, name, min, max, undefined);
+}
+
 function scheduleInteger(value, name, min, max, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
@@ -1017,6 +1060,9 @@ function scheduleInteger(value, name, min, max, fallback) {
 
 function scheduleStartDate(startDate) {
   if (startDate === undefined || startDate === null || startDate === '') {
+    // OPTIONAL on purpose: startDate only anchors the recurrence. The rule is
+    // created DISABLED, and the hour, minute and days decide when it fires, so
+    // "from today" changes nothing a requester would notice. Do not remove.
     const now = new Date();
     return (
       `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}`
@@ -1174,14 +1220,26 @@ function buildWebhookValue(rawValue) {
     });
   }
 
+  // The HTTP method decides whether the call reads or changes the other
+  // system, so a missing one must not quietly become GET.
+  const method = typeof value.method === 'string' ? value.method.trim().toUpperCase() : '';
+  if (method === '') {
+    throw new Error(
+      'The requester did not say which HTTP method the web request uses (for example GET or POST). ' +
+        'Ask them, then send actions[].value.method.'
+    );
+  }
+
   const built = {
     ...value,
     url,
     urlSecure: value.urlSecure === true,
     headers,
     sendIssue: value.sendIssue === true,
+    // OPTIONAL on purpose: 'empty' means "no request body", which is what a
+    // requester who names no content type means. Do not remove.
     contentType: value.contentType || 'empty',
-    method: value.method || 'GET',
+    method,
     // Both default ON. responseEnabled is what makes the body readable at all;
     // continueOnErrorEnabled is what lets a non-2xx reach a condition and an
     // audit-log step instead of aborting the rule before it can say why.
@@ -1231,6 +1289,8 @@ function buildIssueFieldCondition(conditionSpec, fieldMetadata) {
   if (conditionSpec.value === undefined || conditionSpec.value === null || conditionSpec.value === '') {
     throw new Error(`conditions[].value.value is required for field "${fieldName}".`);
   }
+  // OPTIONAL on purpose: EQUALS is the ONLY verified comparison, so a missing
+  // one cannot mean anything else. Do not remove.
   const comparison = conditionSpec.comparison || 'EQUALS';
   if (!VERIFIED_CONDITION_COMPARISONS.includes(comparison)) {
     throw new Error(
@@ -1416,6 +1476,9 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       );
     }
 
+    // OPTIONAL on purpose: some actions take an empty value (for example
+    // jira.issue.refresh.issue). Actions that need keys are checked next by
+    // assertVerifiedComponentValue, which throws and names the missing key.
     let value = action.value ?? {};
     if (action.type === 'jira.issue.outgoing.webhook') {
       value = buildWebhookValue(value);
@@ -1468,8 +1531,9 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
         advancedFields: numericFields.length > 0
           ? buildAdvancedNumericFields(numericFields)
           : null,
-        // Matches the confirmed working rule's value. Explicit `false` in the
-        // spec opts out; anything else (including omitted) keeps this default.
+        // OPTIONAL on purpose: matches the confirmed working rule's value, and
+        // "set a field" with no word about e-mail means Jira's normal behaviour.
+        // Explicit `false` in the spec opts out; anything else (including omitted) keeps this default.
         sendNotifications: value.sendNotifications !== false,
       };
     }
@@ -1530,6 +1594,8 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     rule: {
       name,
       state: 'DISABLED',
+      // OPTIONAL on purpose: a description is documentation for the human who
+      // enables the rule and changes what the rule does in no way.
       description: typeof spec.description === 'string' ? spec.description : '',
       canOtherRuleTrigger: true,
       notifyOnError: 'FIRSTERROR',
@@ -1548,6 +1614,7 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       },
       components,
       ruleScopeARIs: [scope],
+      // OPTIONAL on purpose: labels only tag the rule in the Automation UI.
       labels: Array.isArray(spec.labels) ? spec.labels : [],
       writeAccessType: 'UNRESTRICTED',
       collaborators: [],
@@ -1615,6 +1682,8 @@ function normalizeBranches(spec) {
 }
 
 function checkMatchType(value) {
+  // OPTIONAL on purpose: ALL is the Automation UI's own default for a
+  // condition block, and a single condition reads the same either way.
   const conditionMatchType = value || 'ALL';
   if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
     throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
