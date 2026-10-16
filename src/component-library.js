@@ -521,24 +521,63 @@ const STRUCTURAL_LIBRARY = {
   'jira.condition.container.block': {
     schemaVersion: 1,
     description:
-      'A pass-through wrapper that holds one or more CONDITION_BLOCK children. Every branching rule has ' +
-      'exactly one of these at the point where branching starts; its own value is always empty.',
+      'A pass-through wrapper that holds one or more CONDITION_BLOCK children. The builder emits exactly one ' +
+      'per branching rule; its own value is always empty. You never send this type: send ruleSpec.branches.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: {},
+    // INPUT: the ruleSpec fields that make the builder emit this container.
+    example: {
+      branches: [
+        {
+          conditionMatchType: 'ALL',
+          conditions: [
+            { type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', second: 'High', operator: 'EQUALS' } },
+          ],
+          actions: [{ type: 'codebarrel.action.log', value: 'escalate' }],
+        },
+        {
+          conditions: [],
+          actions: [{ type: 'codebarrel.action.log', value: 'flag' }],
+        },
+      ],
+    },
+    builtInternally: {
+      description:
+        'What the builder EMITS for the example above. This is NOT AN INPUT -- do not send it. ' +
+        'One container holds one if.block per branch, in order; each block has its own id, and its ' +
+        'conditions (conditionParentId) and actions (parentId) point at that id.',
+      shapes: {
+        container: { component: 'CONDITION', type: 'jira.condition.container.block', value: {}, children: ['<one CONDITION_BLOCK per branch>'] },
+      },
+    },
   },
   'jira.condition.if.block': {
     schemaVersion: 1,
     description:
-      'One if/else-if branch: its `conditions` array holds the test(s), its `children` array holds the ' +
-      'actions/conditions that run when the block matches.',
+      'One if / else-if / else branch. Send it as one entry of ruleSpec.branches: its `conditions` hold the ' +
+      'test(s), its `actions` run when the branch matches. You never send this type directly.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: { conditionMatchType: 'ALL' },
+    // INPUT: one entry of ruleSpec.branches.
+    example: {
+      conditionMatchType: 'ALL',
+      conditions: [
+        { type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', second: 'High', operator: 'EQUALS' } },
+      ],
+      actions: [{ type: 'codebarrel.action.log', value: 'matched' }],
+    },
     verifiedMatchTypes: ['ALL', 'ANY'],
+    builtInternally: {
+      description:
+        'What the builder EMITS per branch. This is NOT AN INPUT -- do not send it.',
+      shapes: {
+        ifBlock: { component: 'CONDITION_BLOCK', type: 'jira.condition.if.block', value: { conditionMatchType: 'ALL' }, conditions: ['<branch conditions>'], children: ['<branch actions>'] },
+      },
+    },
     notes:
-      'ELSE is expressed as a trailing jira.condition.if.block sibling with an EMPTY `conditions` ' +
-      'array -- verified in BulkUpdate.txt. It always matches, so anything in its children runs ' +
-      'unconditionally when no earlier block matched; guard the body itself if the fall-through ' +
-      'case includes data that may be absent.',
+      'ELSE is the LAST branch with an EMPTY `conditions` array -- verified in BulkUpdate.txt. It always ' +
+      'matches, so its actions run when no earlier branch matched; guard the body itself if the fall-through ' +
+      'case includes data that may be absent. Only the last branch may be empty, there can be one else, and ' +
+      'every branch needs at least one action. Do not send branches together with top-level ' +
+      'conditions/actions.',
   },
 };
 

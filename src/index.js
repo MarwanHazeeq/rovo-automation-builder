@@ -425,11 +425,14 @@ export async function prepareRule(payload) {
       // internal fieldType class (see EDIT_OPERATION_VALUE_BUILDERS and
       // CONDITION_FIELD_VALUE_BUILDERS above). Only fetch it when actually
       // needed, so rules that use neither don't pay for an extra API call.
-      const needsFieldMetadata =
-        (Array.isArray(parsed.actions) &&
-          parsed.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
-        (Array.isArray(parsed.conditions) &&
-          parsed.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'));
+      // Branches carry their own conditions and actions, so look in those too.
+      const specParts = [parsed, ...(Array.isArray(parsed.branches) ? parsed.branches : [])];
+      const needsFieldMetadata = specParts.some((part) =>
+        (Array.isArray(part?.actions) &&
+          part.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
+        (Array.isArray(part?.conditions) &&
+          part.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'))
+      );
       console.log(`[createJiraAutomationRule] field metadata needed: ${needsFieldMetadata}`);
       const fieldMetadata = needsFieldMetadata
         ? await fetchJiraFieldMetadata(configuredCloudId, email, token)
@@ -1357,9 +1360,12 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
   // the id written into a child's parentId is the same string that ends up on
   // the parent object itself.
   const triggerId = randomUUID();
-  const conditionBlockId = randomUUID();
   const conditionContainerId = randomUUID();
-  const conditions = (spec.conditions || []).map((condition) => {
+
+  // Builds one condition component for the branch whose if.block has id
+  // `conditionBlockId`. The id is per branch: a condition pointing at another
+  // branch's block looks right in the payload and misbehaves in Jira.
+  const buildCondition = (condition, conditionBlockId) => {
     if (!condition || !ALLOWED_CONDITION_TYPES.includes(condition.type)) {
       const received = condition?.type
         ? `"${condition.type}"`
@@ -1390,11 +1396,11 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       schemaVersion:
         condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] || 1,
     });
-  });
+  };
 
-  const hasConditions = conditions.length > 0;
-
-  const actions = (spec.actions || []).map((action) => {
+  // Builds one action component whose parent is `parentId` (the branch's
+  // if.block id, or null for a rule with no conditions).
+  const buildAction = (action, parentId) => {
     if (!action || !ALLOWED_ACTION_TYPES.includes(action.type)) {
       // Name what was rejected, not just what is allowed. Without the offending
       // type the caller cannot tell which of a dozen actions was wrong, and
@@ -1475,36 +1481,49 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     // by the API; this one matches what the Automation UI produces for a rule
     // that has no conditions.
     return component('ACTION', action.type, value, {
-      parentId: hasConditions ? conditionBlockId : null,
+      parentId,
       schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] || 1,
     });
-  });
+  };
 
-  if (!hasConditions && actions.length === 0) {
-    throw new Error('Provide at least one condition or action.');
-  }
-
-  const conditionMatchType = spec.conditionMatchType || 'ALL';
-  if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
-    throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
-  }
+  // One code path: the flat conditions + actions input is treated as a single
+  // branch (see normalizeBranches).
+  const branches = normalizeBranches(spec);
 
   let components;
-  if (hasConditions) {
-    const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
-      conditionMatchType,
-    }, { id: conditionBlockId, parentId: conditionContainerId });
-    conditionBlock.conditions = conditions;
-    conditionBlock.children = actions;
+  const onlyBranch = branches[0];
+  if (branches.length === 1 && onlyBranch.conditions.length === 0) {
+    // No conditions means no if-block to hang actions off, so they sit at the
+    // top of `components` with a null parent. Both shapes are accepted by the
+    // API; this one matches what the Automation UI produces for a rule that
+    // has no conditions.
+    if (onlyBranch.actions.length === 0) {
+      throw new Error('Provide at least one condition or action.');
+    }
+    components = onlyBranch.actions.map((action) => buildAction(action, null));
+  } else {
+    // One if.block per branch, in the order given, all inside ONE container.
+    // An empty-conditions block is the ELSE (validated last by normalizeBranches).
+    const conditionBlocks = branches.map((branch) => {
+      const conditionBlockId = randomUUID();
+      const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
+        conditionMatchType: branch.conditionMatchType,
+      }, { id: conditionBlockId, parentId: conditionContainerId });
+      conditionBlock.conditions = branch.conditions.map((condition) =>
+        buildCondition(condition, conditionBlockId)
+      );
+      conditionBlock.children = branch.actions.map((action) =>
+        buildAction(action, conditionBlockId)
+      );
+      return conditionBlock;
+    });
 
     const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
       id: conditionContainerId,
     });
-    conditionContainer.children = [conditionBlock];
+    conditionContainer.children = conditionBlocks;
 
     components = [conditionContainer];
-  } else {
-    components = actions;
   }
 
   return {
@@ -1534,6 +1553,73 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       collaborators: [],
     },
   };
+}
+
+/**
+ * Turn the ruleSpec's condition logic into one list of branches.
+ *
+ * The flat `conditions` + `actions` input means a single branch, so there is
+ * one build path. A `branches` array expresses if / else-if / else: each entry
+ * has its own conditions, actions and conditionMatchType (default ALL), and an
+ * entry with EMPTY conditions is the ELSE, which always matches.
+ */
+function normalizeBranches(spec) {
+  const hasBranches = spec.branches !== undefined;
+
+  if (!hasBranches) {
+    return [{
+      conditions: spec.conditions || [],
+      actions: spec.actions || [],
+      conditionMatchType: checkMatchType(spec.conditionMatchType),
+    }];
+  }
+
+  // Both at once has no obvious meaning, and silently dropping one is how a
+  // rule ends up missing half its logic.
+  if (spec.conditions !== undefined || spec.actions !== undefined ||
+      spec.conditionMatchType !== undefined) {
+    throw new Error(
+      'Send EITHER "branches" OR top-level "conditions"/"actions"/"conditionMatchType", not both. ' +
+        'Put every condition and action inside a branch.'
+    );
+  }
+  if (!Array.isArray(spec.branches) || spec.branches.length === 0) {
+    throw new Error('branches must be a non-empty array of { conditions, actions } entries.');
+  }
+
+  const lastIndex = spec.branches.length - 1;
+  return spec.branches.map((branch, index) => {
+    const label = `branches[${index}]`;
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
+      throw new Error(`${label} must be an object with conditions and actions.`);
+    }
+    const conditions = branch.conditions ?? [];
+    const actions = branch.actions ?? [];
+    if (!Array.isArray(conditions) || !Array.isArray(actions)) {
+      throw new Error(`${label}: conditions and actions must be arrays.`);
+    }
+    if (actions.length === 0) {
+      throw new Error(`${label} has no actions, so it would do nothing. Give it at least one action.`);
+    }
+    // A branch with no conditions always matches, so it is the else. Anywhere
+    // but last, every branch after it could never run.
+    if (conditions.length === 0 && index !== lastIndex) {
+      throw new Error(
+        `${label} has no conditions, so it always matches and branches after it would be ` +
+          'unreachable. Only the LAST branch may have empty conditions (the else), and there ' +
+          'can be only one.'
+      );
+    }
+    return { conditions, actions, conditionMatchType: checkMatchType(branch.conditionMatchType) };
+  });
+}
+
+function checkMatchType(value) {
+  const conditionMatchType = value || 'ALL';
+  if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
+    throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
+  }
+  return conditionMatchType;
 }
 
 // `id` is pulled out of `extra` first so a caller can supply one. Previously

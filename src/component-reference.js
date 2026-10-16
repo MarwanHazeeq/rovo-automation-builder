@@ -28,7 +28,9 @@ const USAGE_NOTES = [
     'described here. Do not refuse to use a smart value because it is absent from this reference.',
   'An entry marked verified: false has no confirmed export on this tenant. Do not build with it; ' +
     'say it is unverified and stop.',
-  'A rule supports ONE condition branch. if / else-if cannot be expressed; that needs several rules.',
+  'A rule supports several condition branches through ruleSpec.branches (if / else-if / else). ' +
+    'Each branch has its own conditions and actions; the LAST branch with empty conditions is the else. ' +
+    'Only the last branch may have empty conditions. Different outcomes for different cases are ONE rule.',
   'There is no iteration component. Per issue, use the jira.jql.scheduled trigger. Per list item, ' +
     'use {{#list}}...{{/}} inside a jira.create.variable step.',
   'Read a web-request response as {{webhookResponse.*}}, never {{webResponse.*}}. A second request ' +

@@ -10,6 +10,7 @@ import {
   TRIGGER_LIBRARY,
   ACTION_LIBRARY,
   CONDITION_LIBRARY,
+  STRUCTURAL_LIBRARY,
 } from '../src/component-library.js';
 
 // The contract: the `example` the library hands the agent (through
@@ -67,6 +68,27 @@ for (const [type, entry] of Object.entries(CONDITION_LIBRARY)) {
   });
 }
 
+// Structural entries document the INPUT (ruleSpec.branches fields); the
+// container/if.block shapes live under builtInternally as labelled output.
+test('structural container: the documented branches example builds one container', () => {
+  const { rule } = build({
+    trigger: BASE_TRIGGER,
+    ...STRUCTURAL_LIBRARY['jira.condition.container.block'].example,
+  });
+  assert.equal(rule.components.length, 1);
+  assert.equal(rule.components[0].type, 'jira.condition.container.block');
+  assert.equal(rule.components[0].children.length, 2);
+});
+
+test('structural if.block: the documented branch example is accepted', () => {
+  const { rule } = build({
+    trigger: BASE_TRIGGER,
+    branches: [STRUCTURAL_LIBRARY['jira.condition.if.block'].example],
+  });
+  assert.equal(rule.state, 'DISABLED');
+  assert.equal(rule.components[0].children[0].type, 'jira.condition.if.block');
+});
+
 // A trigger's example is the settings sent next to `type`, e.g.
 // { type, fromStatus: [...] }.
 for (const [type, entry] of Object.entries(TRIGGER_LIBRARY)) {
@@ -81,7 +103,7 @@ for (const [type, entry] of Object.entries(TRIGGER_LIBRARY)) {
 }
 
 test('every entry that records a builtInternally shape marks it as not an input', () => {
-  for (const library of [TRIGGER_LIBRARY, ACTION_LIBRARY, CONDITION_LIBRARY]) {
+  for (const library of [TRIGGER_LIBRARY, ACTION_LIBRARY, CONDITION_LIBRARY, STRUCTURAL_LIBRARY]) {
     for (const [type, entry] of Object.entries(library)) {
       if (entry.builtInternally === undefined) continue;
       assert.match(

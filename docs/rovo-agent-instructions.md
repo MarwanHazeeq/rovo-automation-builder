@@ -13,6 +13,11 @@ Drafting a new rule:
    specific types you need). Use only shapes it returns. If a type is not
    listed, tell the user it is not supported yet instead of guessing.
 2. Build a ruleSpec JSON (name, projectName, trigger, conditions, actions).
+   A request with different outcomes for different cases ("escalate, otherwise
+   flag it") is ONE rule with several `branches`, never several rules. Ask the
+   requester what happens in each case. The last branch with empty
+   `conditions` is the else. Send `branches` INSTEAD of top-level
+   conditions/actions, never both.
    projectName is the project's display name exactly as the requester gave
    it (for example "SOCDemo"). Never send a project ID or key and never
    guess a project: the app looks the name up. If the draft fails because
