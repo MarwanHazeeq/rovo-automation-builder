@@ -74,6 +74,15 @@ modules:
           description: |
             The complete revised ruleSpec JSON, in the same format as for
             draft-automation-rule (not a diff), including projectName.
+        requestText:
+          title: Change request text
+          type: string
+          required: false
+          description: |
+            The manager's change request, copied word for word. Send it
+            whenever the revision follows one, for ANY change (trigger,
+            conditions, actions, branches). Shown on the ticket. Required
+            to deliberately reduce the number of branches.
     - key: create-approved-automation-rule
       name: Create approved automation rule
       function: create-approved-fn

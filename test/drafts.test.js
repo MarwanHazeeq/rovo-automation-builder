@@ -422,6 +422,35 @@ test('a revision that flattens a branching request into one branch is refused', 
   assert.equal((await revise(2)).ok, true);
 });
 
+test('a manager change request lets a revision drop branches, and is shown on the ticket', async () => {
+  const ctx = setup({ prepare: preparedWithBranches(2) });
+  await ctx.actions.draftAutomationRule({ ruleSpec: '{}', requestText: OTHERWISE_TEXT });
+  ctx.jira.getIssue = liveIssue(APPROVAL_IDS.changesRequestedStatus);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWithBranches(1), getEnv: () => APPROVAL_ENV,
+  });
+  const result = await revise.reviseAutomationRuleDraft({
+    issueKey: 'AUTOAPR-7', ruleSpec: '{}', requestText: 'Manager: one branch is enough',
+  });
+  assert.equal(result.ok, true);
+  const stored = await ctx.store.getDraft('20001');
+  assert.equal(stored.changeRequest, 'Manager: one branch is enough');
+  assert.equal(stored.requestText, OTHERWISE_TEXT); // the original stays
+  const comment = adfText(ctx.jira.calls.addComment.at(-1).body);
+  assert.match(comment, /Change request \(as sent by the agent\):\s+Manager: one branch is enough/);
+});
+
+test('a change request about anything else is recorded too, and clears on the next revision', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedOk(), getEnv: () => APPROVAL_ENV,
+  });
+  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}', requestText: 'Change the comment text' });
+  assert.equal((await ctx.store.getDraft('20001')).changeRequest, 'Change the comment text');
+  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+  assert.equal((await ctx.store.getDraft('20001')).changeRequest, null);
+});
+
 test('a revision of a draft stored without requestText skips the branch check', async () => {
   const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
   const draft = await ctx.store.getDraft('20001');

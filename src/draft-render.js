@@ -86,7 +86,7 @@ export function renderDraftAttachment(record) {
  * case the comment says so (the summary alone is enough to decide on).
  */
 export function renderDraftComment(record, { attachmentName, attachmentError } = {}) {
-  const { rule, version, digest, scope } = record;
+  const { rule, version, digest, scope, changeRequest } = record;
   const outline = summarizeRule(rule);
 
   const attachmentLine = attachmentName
@@ -99,6 +99,9 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
     heading(3, `Draft v${version}: proposed automation rule`),
     paragraph(text('Written by the Automation Rule Builder app from the stored draft. '),
       strong('No rule exists yet.')),
+    ...(changeRequest
+      ? [paragraph(strong('Change request (as sent by the agent): '), text(changeRequest))]
+      : []),
     bulletList([
       [strong('Name: '), text(rule.name)],
       [strong('Project scope: '), code(scope)],

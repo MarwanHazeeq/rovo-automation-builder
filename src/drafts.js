@@ -192,9 +192,23 @@ export function createDraftActions({
       // stored with it. Without this the agent could flatten a two-branch
       // draft into one branch while "revising". Drafts stored before
       // requestText existed have none, so they skip the check.
-      if (existing.requestText) {
+      //
+      // The manager's change request (`requestText`, optional) covers ANY
+      // change: a trigger, a condition, an action, a branch. It is always
+      // recorded and shown on the ticket. It is also the one way to
+      // deliberately drop branches the original request called for; the agent
+      // writes it, so it proves nothing alone, but the approver sees it.
+      const changeRequest = typeof payload?.requestText === 'string' && payload.requestText.trim() !== ''
+        ? truncate(payload.requestText.trim(), 5000)
+        : null;
+      if (existing.requestText && !changeRequest) {
         const branchError = checkBranchesMatchRequest(existing.requestText, countBranches(prepared.rule));
-        if (branchError) return draftFailure(branchError, { issueKey });
+        if (branchError) {
+          return draftFailure(
+            `${branchError} If the manager asked for fewer branches, send their change request in requestText.`,
+            { issueKey }
+          );
+        }
       }
 
       // The project line at the top of the ticket was written for v1. A
@@ -217,6 +231,9 @@ export function createDraftActions({
         scope: prepared.scope,
         digest: digestRule(rule),
         version,
+        // Replaced on every revision, so a later revision without text does
+        // not show an older request as if it were current.
+        changeRequest,
       });
       if (!updated) return draftFailure(`The draft for ${issueKey} could not be revised.`);
 

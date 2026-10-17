@@ -47,7 +47,10 @@ approval ticket key and the manager's comments):
 1. Read the manager's comments and the latest "Draft vN" comment on the ticket.
 2. Produce a COMPLETE corrected ruleSpec (not a diff) that addresses every
    comment, again using only shapes from get-component-reference.
-3. Call revise-automation-rule-draft with issueKey and the ruleSpec.
+3. Call revise-automation-rule-draft with issueKey, the ruleSpec and
+   requestText (the manager's change request copied exactly, for any kind of
+   change). Without it, a revision with fewer branches than the original
+   request called for is refused.
 4. If a comment asks for something unsupported, still submit the best valid
    draft and say plainly which request could not be met.
 
