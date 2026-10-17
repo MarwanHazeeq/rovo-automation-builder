@@ -405,3 +405,30 @@ test('a revision that changes the target project is refused', async () => {
   assert.match(result.error, /different project/);
   assert.equal((await ctx.store.getDraft('20001')).version, 1);
 });
+
+test('a revision that flattens a branching request into one branch is refused', async () => {
+  const ctx = setup({ prepare: preparedWithBranches(2) });
+  await ctx.actions.draftAutomationRule({ ruleSpec: '{}', requestText: OTHERWISE_TEXT });
+  ctx.jira.getIssue = liveIssue(APPROVAL_IDS.changesRequestedStatus);
+  const revise = (count) => createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWithBranches(count), getEnv: () => APPROVAL_ENV,
+  }).reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+
+  const flattened = await revise(1);
+  assert.equal(flattened.ok, false);
+  assert.match(flattened.error, /more than one case/);
+  assert.equal((await ctx.store.getDraft('20001')).version, 1);
+
+  assert.equal((await revise(2)).ok, true);
+});
+
+test('a revision of a draft stored without requestText skips the branch check', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const draft = await ctx.store.getDraft('20001');
+  delete draft.requestText;
+  await ctx.store.saveDraft(draft);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWithBranches(1), getEnv: () => APPROVAL_ENV,
+  });
+  assert.equal((await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' })).ok, true);
+});

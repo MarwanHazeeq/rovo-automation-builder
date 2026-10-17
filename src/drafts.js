@@ -188,6 +188,15 @@ export function createDraftActions({
       const prepared = await prepare(payload);
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared, issueKey });
 
+      // Same branch check as the first draft, against the requester's words
+      // stored with it. Without this the agent could flatten a two-branch
+      // draft into one branch while "revising". Drafts stored before
+      // requestText existed have none, so they skip the check.
+      if (existing.requestText) {
+        const branchError = checkBranchesMatchRequest(existing.requestText, countBranches(prepared.rule));
+        if (branchError) return draftFailure(branchError, { issueKey });
+      }
+
       // The project line at the top of the ticket was written for v1. A
       // revision that moves the rule to another project would leave the
       // approver reading the wrong one, so a new request is needed instead.
