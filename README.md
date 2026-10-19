@@ -300,10 +300,16 @@ Automation API JSON. A minimal specification looks like this:
 }
 ```
 
-The current safe builder supports the verified created, transitioned, and
-field-change triggers; comparator and issue conditions; and the verified
-variable, log, webhook, wait, transition, edit, entity-property, refresh,
-mapping-variable, and comment actions. A document can contain the business
+The safe builder supports every component type in `src/component-library.js`
+(call `get-component-reference` for the live list). Each shape was copied from
+a real rule on the site, most of them found with:
+
+```bash
+node --env-file=.env scripts/find-component-examples.js --survey > survey.json
+```
+
+which scans every rule (read-only) and lists the trigger, condition, action
+and field types that are in use but not yet supported. A document can contain the business
 request in any prose format; the agent's job is to populate this small
 specification. The project is named by its display name in `projectName`; the app looks it
 up with the Jira project search and refuses a name that matches no project or

@@ -56,7 +56,8 @@ test('rejects the wait shape that produced the opaque 500', async () => {
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /missing waitTimeInSeconds, randomWaitInterval/);
+  // randomWaitInterval is verified as null, so it is filled in rather than reported.
+  assert.match(result.error, /missing waitTimeInSeconds;/);
   assert.match(result.error, /unexpected delay/);
   assert.equal(posted, false, 'a malformed value must not reach Atlassian');
 });
@@ -139,11 +140,11 @@ test('accepts a verified comparator operator', async () => {
 
 test('the error names the full verified shape so the caller can self-correct', async () => {
   const { result } = await build({
-    actions: [{ type: 'jira.issue.refresh.issue', value: {} }],
+    actions: [{ type: 'jira.issue.comment', value: {} }],
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /The verified shape has exactly: delayMs/);
+  assert.match(result.error, /The verified shape has exactly: comment, publicComment, commentVisibility, sendNotifications, addCommentOnce/);
 });
 
 test('an unverified action type is named in the error, not just the allowlist', async () => {

@@ -73,7 +73,10 @@ test('kind returns every shape of that kind', async () => {
 
   assert.equal(result.ok, true);
   const types = result.components.map((c) => c.type);
-  assert.deepEqual(types.sort(), ['jira.comparator.condition', 'jira.issue.condition']);
+  assert.deepEqual(types.sort(), [
+    'jira.affected.services.condition', 'jira.comparator.condition', 'jira.issue.condition',
+    'jira.jql.condition', 'jira.user.condition',
+  ]);
   assert.ok(result.components.every((c) => c.schemaVersion !== undefined));
 });
 

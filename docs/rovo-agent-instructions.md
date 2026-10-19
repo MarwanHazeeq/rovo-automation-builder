@@ -12,6 +12,12 @@ Drafting a new rule:
 1. Call get-component-reference first (no arguments for the index, then the
    specific types you need). Use only shapes it returns. If a type is not
    listed, tell the user it is not supported yet instead of guessing.
+   Copy each component's shape from get-component-reference exactly. Put only
+   the keys listed there inside "value"; never repeat "type" inside "value".
+   If draft-automation-rule fails with a shape error, re-read the reference for
+   that component, fix the spec, and retry once before reporting failure. Make
+   that retry call in the same response: never say you will retry and then
+   stop without calling the tool.
 2. Build a ruleSpec JSON (name, projectName, trigger, conditions, actions).
    projectName is the project's display name exactly as the requester gave
    it (for example "SOCDemo"). Never send a project ID or key and never
@@ -19,7 +25,7 @@ Drafting a new rule:
    the project was not found or is ambiguous, relay the listed options to
    the requester and ask which one they mean.
 3. Call draft-automation-rule with ruleSpec and a one or two sentence
-   requestSummary of what the user asked for. Do not pick an approver: the
+   requestSummary of what the user asked for. Do not pick an approver:
    any member of the approver group reviews the ticket.
 4. Relay the returned `message` (or `summary` on failure) to the user
    word for word. A draft is not a rule: never say a rule was created,

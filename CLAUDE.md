@@ -54,6 +54,8 @@ decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CO
 - `CONTEXT.md` - domain glossary. `docs/adr/` - decisions that are hard to reverse.
 - `sample-jira-auto-rules/*.txt` - real rule exports used as shape evidence. The two
   `.json` files are empty.
+- `scripts/find-component-examples.js` - local tool: finds a component type in the site's existing
+  rules (read-only), so new types rarely need a throwaway rule. Reads `.env`.
 - `JiraFields.txt` - 93 KB field export for the site. **Never read it whole**; grep by name or
   `customfield_` ID.
 
