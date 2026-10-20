@@ -2,7 +2,9 @@ import { prepareRule, redactSecrets } from './index.js';
 import { findTransitionId, resolveApprovalConfig } from './approval-config.js';
 import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
-import { digestRule, renderDraftAttachment, renderDraftComment, withTicketPrefix } from './draft-render.js';
+import {
+  digestRule, projectIdFromScope, projectLine, renderDraftAttachment, renderDraftComment, withTicketPrefix,
+} from './draft-render.js';
 import { createReadyMarker } from './mark-request-ready.js';
 
 /**
@@ -32,22 +34,37 @@ export function createDraftActions({
   return {
     /**
      * Rovo action `draft-automation-rule`.
-     * Inputs: `ruleSpec` (JSON string, same contract as before), an
-     * optional `requestSummary` (the agent's plain-language description,
+     * Inputs: `ruleSpec` (JSON string, same contract as before),
+     * `requestText` (REQUIRED: the requester's message, as sent; it goes on
+     * the ticket for the manager and is checked for words that describe more
+     * than one case, see prepareRule), an optional `requestSummary` (the agent's plain-language description,
      * shown on the ticket and clearly labelled as the agent's words).
      * No assignee is sent, so Jira's project default assignee applies.
      * Approvers are the members of the approver group, and any of them may
      * pick the ticket up.
      */
     async draftAutomationRule(payload, invocationContext) {
+      // The agent writes this field, so it proves nothing about what the
+      // requester said. It is an audit trail for the manager, and the input to
+      // the branch-word check. Never logged: it is free text from a person.
+      const requestText = typeof payload?.requestText === 'string' ? payload.requestText.trim() : '';
+      if (requestText === '') {
+        return draftFailure(
+          "The requester's message was not provided. Send it exactly as the requester wrote it in " +
+            'requestText; if there is no message to send, ask the requester what they want first.'
+        );
+      }
+
       const configResult = await resolveApprovalConfig(jira, getEnv());
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
 
       // 1. Build and validate. Nothing is created; the only network call is
       //    the read-only field-metadata lookup.
-      const prepared = await prepare(payload);
+      const prepared = await prepare({ ...payload, requestText });
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared });
+      const projectId = projectIdFromScope(prepared.scope);
+      const projectName = prepared.projectName ?? null;
 
       // 2. Raise the approval ticket AS THE USER, so they are the reporter.
       let issue;
@@ -56,7 +73,7 @@ export function createDraftActions({
           project: { key: config.projectKey },
           issuetype: { id: config.issueTypeId },
           summary: truncate(`Automation rule request: ${prepared.rule.name}`, 250),
-          description: describeRequest(payload?.requestSummary),
+          description: describeRequest({ projectName, projectId, requestText, requestSummary: payload?.requestSummary }),
         });
       } catch (error) {
         return draftFailure(`The approval ticket could not be created: ${error.message}`);
@@ -73,6 +90,10 @@ export function createDraftActions({
         rule,
         scope: prepared.scope,
         digest: digestRule(rule),
+        projectName,
+        // Kept so a revision is checked against the same words (the revise
+        // call is headless and carries no request text of its own).
+        requestText,
         // Where Rovo puts the invoking user's accountId is still open (spike
         // S1): the docs say the handler's second argument carries
         // `principal.accountId`. Both places are checked. null is fine: the
@@ -104,7 +125,7 @@ export function createDraftActions({
       // 5. Now the ticket exists and the draft is attached: mark it ready so
       //    the manager gets the Teams heads-up. Only first submissions are
       //    marked; a revision keeps the labels and sends nothing new.
-      const readyForReview = await markReady(issue.key, config.projectKey);
+      const readyForReview = await markReady(issue.key, config.projectKey, { projectName, projectId });
 
       return {
         ok: true,
@@ -126,7 +147,8 @@ export function createDraftActions({
     /**
      * Rovo action `revise-automation-rule-draft`.
      * Inputs: `issueKey` (the approval ticket) and `ruleSpec` (the revised
-     * spec). Usually called by the agent when a Jira automation rule runs it
+     * spec). It takes no requestText: the original is stored with the draft
+     * and reused, so a headless revision cannot drop or rewrite it. Usually called by the agent when a Jira automation rule runs it
      * after the manager picked "Request Changes", so there may be no user
      * present; every Jira call here is made as the app.
      */
@@ -163,7 +185,7 @@ export function createDraftActions({
         return draftFailure(`The draft for ${issueKey} is ${existing.state} and can no longer be revised.`);
       }
 
-      const prepared = await prepare(payload);
+      const prepared = await prepare({ ...payload, requestText: existing.requestText });
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared, issueKey });
 
       const rule = withTicketPrefix(prepared.rule, issue.key);
@@ -173,6 +195,7 @@ export function createDraftActions({
       const updated = await store.applyEvent(existing, 'revise', {
         rule,
         scope: prepared.scope,
+        projectName: prepared.projectName ?? null,
         digest: digestRule(rule),
         version,
       });
@@ -283,8 +306,14 @@ async function postDraftArtifacts(jira, issueKey, record) {
     : null;
 }
 
-/** Ticket description: the agent's summary, labelled as such. */
-function describeRequest(requestSummary) {
+/**
+ * Ticket description. The target project comes first, above everything the
+ * agent wrote, because it is the one thing the app cannot check against the
+ * conversation: the manager is the last point where a wrong project is free to
+ * fix. Then the requester's message as the agent sent it, then the agent's
+ * summary, each labelled as such.
+ */
+function describeRequest({ projectName, projectId, requestText, requestSummary }) {
   const summary = typeof requestSummary === 'string' && requestSummary.trim() !== ''
     ? truncate(requestSummary.trim(), 5000)
     : '(no summary supplied)';
@@ -292,6 +321,12 @@ function describeRequest(requestSummary) {
     type: 'doc',
     version: 1,
     content: [
+      { type: 'paragraph', content: [
+        { type: 'text', text: 'Target project: ', marks: [{ type: 'strong' }] },
+        { type: 'text', text: projectLine(projectName, projectId) },
+      ] },
+      { type: 'paragraph', content: [{ type: 'text', text: "Requester's message, as sent by the agent (not verified):", marks: [{ type: 'strong' }] }] },
+      { type: 'paragraph', content: [{ type: 'text', text: truncate(requestText, 10000) }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'Request as described by the agent (not authoritative):', marks: [{ type: 'strong' }] }] },
       { type: 'paragraph', content: [{ type: 'text', text: summary }] },
       { type: 'paragraph', content: [{ type: 'text', text: 'The authoritative draft is the latest "Draft vN" comment, written by the app.' }] },

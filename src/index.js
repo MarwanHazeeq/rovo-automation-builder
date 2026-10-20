@@ -26,6 +26,8 @@ const TRIGGER_BUILDERS = {
       }
       return {
         eventFilters: [scope],
+        // Optional: "the field changed" already means any change, which is the
+        // only reading of a requester who names no particular kind of change.
         changeType: trigger.changeType || trigger.value?.changeType || 'ANY_CHANGE',
         fields: triggerFields.map((field) => ({
           value: normalizeTriggerFieldName(field),
@@ -55,6 +57,8 @@ const TRIGGER_BUILDERS = {
       const triggerValue = trigger.value || {};
       const fromStatus = trigger.fromStatus ?? triggerValue.fromStatus;
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
+      // Optional: an empty list means "any status" (the library documents it),
+      // and "when a ticket changes status" with no statuses named is a real request.
       return {
         eventFilters: [scope],
         fromStatus: Array.isArray(fromStatus) ? fromStatus : [],
@@ -90,6 +94,8 @@ const TRIGGER_BUILDERS = {
     schemaVersion: 1,
     buildValue(trigger, scope) {
       const triggerValue = trigger.value || {};
+      // Optional: -1999 means "any project", so a requester who names no source
+      // or target project is asking for exactly that.
       const projectFilter = (raw, label) => {
         const text = String(raw ?? '-1999').trim();
         if (text !== '-1999' && !/^\d+$/.test(text)) {
@@ -148,8 +154,8 @@ const TRIGGER_BUILDERS = {
     buildValue(trigger) {
       const triggerValue = trigger.value || {};
       const jql = nonEmptyString(trigger.jql ?? triggerValue.jql, 'trigger.jql');
-      // Default false matches the verified export: re-scan the whole result
-      // set each run rather than only issues touched since the last run.
+      // Optional: false (re-scan the whole result set each run) matches the
+      // verified export, and is what a requester means by "every issue that matches".
       const onlyUpdatedIssues =
         (trigger.onlyUpdatedIssues ?? triggerValue.onlyUpdatedIssues) === true;
       return {
@@ -563,6 +569,40 @@ function readAutomationEnvironment() {
 }
 
 /**
+ * Words and phrases in a request that show it describes more than one case.
+ * Matched as whole words, ignoring upper and lower case. An entry that is an
+ * array is a pair that counts only when ALL of its words appear (so "if" alone
+ * does not, but "if ... else" does). This is a word search, not an
+ * understanding of the request: "escalate unless it is already assigned" is
+ * one case that contains "unless". That costs one extra question to the
+ * requester; the opposite mistake builds a rule that quietly does the wrong thing.
+ */
+export const BRANCH_WORDS = ['otherwise', 'unless', 'or else', 'in that case', 'depending on', ['if', 'else']];
+
+/** The BRANCH_WORDS found in `requestText`, each as the phrase to show (a pair reads "if ... else"). */
+export function findBranchWords(requestText) {
+  const hasWord = (phrase) =>
+    new RegExp(`\\b${phrase.trim().split(/\s+/).join('\\s+')}\\b`, 'i').test(requestText);
+  return BRANCH_WORDS
+    .filter((entry) => (Array.isArray(entry) ? entry.every(hasWord) : hasWord(entry)))
+    .map((entry) => (Array.isArray(entry) ? entry.join(' ... ') : entry));
+}
+
+/**
+ * How many cases a built rule has: the number of if-blocks anywhere in it
+ * (nested ones included, so a rule that splits twice inside one branch counts
+ * as having several cases), and at least 1, because a rule with no blocks still
+ * has its one unconditional case.
+ */
+export function countBranches(rule) {
+  let blocks = 0;
+  walkComponents(rule.components ?? [], (node) => {
+    if (node.type === 'jira.condition.if.block') blocks += 1;
+  });
+  return Math.max(1, blocks);
+}
+
+/**
  * First half: turn the agent's input into a validated Automation API rule
  * WITHOUT creating anything. The only network call is the optional
  * field-metadata GET (read-only).
@@ -606,6 +646,9 @@ export async function prepareRule(payload) {
   }
 
   let requestBody;
+  // The project's display name when the spec named it; null for a full payload
+  // or a bare projectId. Handed back so the approval ticket can show it.
+  let projectName = null;
   console.log(
     `[createJiraAutomationRule] parsed input as ${isFullRulePayload(parsed) ? 'a full rule payload' : 'a rule specification'}`
   );
@@ -642,10 +685,11 @@ export async function prepareRule(payload) {
 
       // The agent sends a project NAME; the numeric id is resolved here so
       // the agent never has to handle (or guess) a number.
-      const projectId = await resolveProjectId(parsed, configuredCloudId, email, token);
+      const project = await resolveProjectId(parsed, configuredCloudId, email, token);
+      projectName = project.name;
 
       requestBody = buildRulePayload(
-        { ...parsed, projectId },
+        { ...parsed, projectId: project.id },
         configuredCloudId,
         actorAccountId,
         fieldMetadata
@@ -662,7 +706,21 @@ export async function prepareRule(payload) {
   if (!allowlistCheck.ok) return failure(allowlistCheck.error);
 
   const { cloudId, rule, scope } = validation;
-  return { ok: true, rule, scope, cloudId };
+
+  // Only the built rule is counted, so a spec and a full payload are held to
+  // the same standard. requestText is not logged: it is free text from a person.
+  if (typeof payload?.requestText === 'string') {
+    const found = findBranchWords(payload.requestText);
+    if (found.length > 0 && countBranches(rule) < 2) {
+      return failure(
+        `The request describes more than one case (it contains ${found.map((word) => `"${word}"`).join(', ')}), ` +
+          'but the draft has only one branch. Do not put both outcomes in one branch: they would both ' +
+          'run every time instead of one or the other. Confirm with the requester what should happen in ' +
+          'each case, then send a branch for each in ruleSpec.branches.'
+      );
+    }
+  }
+  return { ok: true, rule, scope, cloudId, projectName };
 }
 
 /**
@@ -873,10 +931,11 @@ async function resolveProjectId(spec, cloudId, email, token) {
         'Neither projectName nor projectId was provided.'
     );
   }
-  if (!hasName) return spec.projectId;
+  // A bare projectId has no name to show; the ticket then shows the id alone.
+  if (!hasName) return { id: spec.projectId, name: null };
 
   const projectName = nonEmptyString(spec.projectName, 'projectName');
-  const resolvedId = await findProjectIdByName(projectName, cloudId, email, token);
+  const { id: resolvedId, name: resolvedName } = await findProjectByName(projectName, cloudId, email, token);
 
   if (hasId && String(spec.projectId).trim() !== resolvedId) {
     throw new Error(
@@ -884,16 +943,16 @@ async function resolveProjectId(spec, cloudId, email, token) {
         `projects (the name resolves to project id ${resolvedId}). Send only projectName.`
     );
   }
-  return resolvedId;
+  return { id: resolvedId, name: resolvedName };
 }
 
 /**
- * Look a project up by exact display name. The search endpoint's `query` is a
+ * Look a project up by exact display name, returning { id, name }. The search endpoint's `query` is a
  * SUBSTRING match on name and key, so its response is a candidate list: the
  * exact-name filter below is what makes this an answer. Zero or several exact
  * matches throw, naming real options so the agent can report them.
  */
-async function findProjectIdByName(projectName, cloudId, email, token) {
+async function findProjectByName(projectName, cloudId, email, token) {
   const auth = Buffer.from(`${email}:${token}`).toString('base64');
   const wanted = projectName.trim().toLowerCase();
   const candidates = [];
@@ -904,7 +963,7 @@ async function findProjectIdByName(projectName, cloudId, email, token) {
       `${JIRA_SITE_API_BASE}/${cloudId}/rest/api/3/project/search` +
       `?query=${encodeURIComponent(projectName)}` +
       `&startAt=${candidates.length}&maxResults=${PROJECT_SEARCH_PAGE_SIZE}`;
-    console.log(`[findProjectIdByName] GET ${url}`);
+    console.log(`[findProjectByName] GET ${url}`);
     let response;
     let body;
     try {
@@ -943,7 +1002,7 @@ async function findProjectIdByName(projectName, cloudId, email, token) {
       project && typeof project.name === 'string' && project.name.trim().toLowerCase() === wanted
   );
 
-  if (matches.length === 1) return String(matches[0].id);
+  if (matches.length === 1) return { id: String(matches[0].id), name: matches[0].name.trim() };
 
   if (matches.length === 0) {
     const names = candidates
@@ -1129,7 +1188,9 @@ function isSafeJiraNumericExpression(expression) {
 
 const RRULE_WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
 const RRULE_FREQUENCIES = ['DAILY', 'WEEKLY'];
-const DEFAULT_SCHEDULE_TIMEZONE = 'Asia/Singapore';
+
+// A value the agent did not send: absent, null or an empty string.
+const isMissing = (value) => value === undefined || value === null || value === '';
 
 /**
  * Build the iCal VEVENT string a jira.jql.scheduled trigger expects.
@@ -1159,16 +1220,35 @@ function buildScheduleRRule(schedule) {
 
   const config = schedule && typeof schedule === 'object' ? schedule : {};
 
+  // Optional: a WEEKLY schedule must name its days (checked below), so leaving
+  // frequency out cannot hide a missing answer; DAILY has to be asked for.
   const frequency = String(config.frequency || 'WEEKLY').toUpperCase();
   if (!RRULE_FREQUENCIES.includes(frequency)) {
     throw new Error(`trigger.schedule.frequency must be one of ${RRULE_FREQUENCIES.join(', ')}.`);
   }
 
-  const hour = scheduleInteger(config.hour, 'hour', 0, 23, 9);
-  const minute = scheduleInteger(config.minute, 'minute', 0, 59, 0);
+  // The time of day and the time zone decide WHEN the rule runs, so the
+  // requester must have chosen them. A made-up 09:00 Singapore time looks fine
+  // on the ticket and runs at the wrong hour for everyone else.
+  if (isMissing(config.hour) || isMissing(config.minute)) {
+    throw new Error(
+      'The requester did not say what time of day the rule should run. Ask them for the ' +
+        'time (for example 9:30), then send trigger.schedule.hour (0-23) and trigger.schedule.minute (0-59).'
+    );
+  }
+  if (isMissing(config.timezone)) {
+    throw new Error(
+      'The requester did not say which time zone the schedule is in. Ask them (for example ' +
+        '"Asia/Singapore") and send it as trigger.schedule.timezone; do not assume one.'
+    );
+  }
+  const hour = scheduleInteger(config.hour, 'hour', 0, 23);
+  const minute = scheduleInteger(config.minute, 'minute', 0, 59);
+  // Optional: 1 means "every week" (or every day), which is what a requester
+  // who names no gap between runs is asking for.
   const interval = scheduleInteger(config.interval, 'interval', 1, 52, 1);
 
-  const timezone = config.timezone || DEFAULT_SCHEDULE_TIMEZONE;
+  const timezone = config.timezone;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: timezone });
   } catch {
@@ -1177,7 +1257,13 @@ function buildScheduleRRule(schedule) {
 
   let days = [];
   if (frequency === 'WEEKLY') {
-    const requested = config.days ?? config.byDay ?? ['MO'];
+    const requested = config.days ?? config.byDay;
+    if (isMissing(requested)) {
+      throw new Error(
+        'The requester did not say which days of the week the rule should run. Ask them, then ' +
+          'send trigger.schedule.days (for example ["MO","TH"]).'
+      );
+    }
     days = (Array.isArray(requested) ? requested : [requested])
       .map((day) => String(day).trim().toUpperCase().slice(0, 2));
     if (days.length === 0) {
@@ -1217,7 +1303,7 @@ function pad2(value) {
 }
 
 function scheduleInteger(value, name, min, max, fallback) {
-  if (value === undefined || value === null || value === '') return fallback;
+  if (isMissing(value)) return fallback;
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
     throw new Error(`trigger.schedule.${name} must be an integer between ${min} and ${max}.`);
@@ -1226,7 +1312,9 @@ function scheduleInteger(value, name, min, max, fallback) {
 }
 
 function scheduleStartDate(startDate) {
-  if (startDate === undefined || startDate === null || startDate === '') {
+  // Optional: no start date means "from today", which is how Jira's own
+  // Automation UI behaves and what "starting now" means to a requester.
+  if (isMissing(startDate)) {
     const now = new Date();
     return (
       `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}`
@@ -1391,6 +1479,11 @@ function buildWebhookValue(rawValue) {
     });
   }
 
+  // Optional, all of them. url is the only value a web request cannot do
+  // without (required above). GET with an empty body is HTTP's own default for
+  // "call this address"; secure flags off and no extra headers are what a
+  // request that names none of them means; the two response flags are
+  // explained below.
   const built = {
     ...value,
     url,
@@ -1448,6 +1541,8 @@ function buildIssueFieldCondition(conditionSpec, fieldMetadata) {
   if (conditionSpec.value === undefined || conditionSpec.value === null || conditionSpec.value === '') {
     throw new Error(`conditions[].value.value is required for field "${fieldName}".`);
   }
+  // Optional: "the field is X" means EQUALS. Any other comparison has to be
+  // named, and one that is not verified for the field is refused below.
   const comparison = conditionSpec.comparison || 'EQUALS';
   // Checked once the field is known, because verified comparisons differ per field.
   const assertComparison = (verified) => {
@@ -1552,7 +1647,8 @@ function normalizeFullPayload(parsed, actorAccountId) {
   }
   // A rule with no actor is rejected with a generic parse error. A pasted
   // payload usually carries one already; supply the configured account when
-  // it does not.
+  // it does not. This comes from the Forge environment, not from the requester,
+  // so it is not a value anyone could have been asked for.
   if (!rule.actor) {
     rule.actor = { type: 'ACCOUNT_ID', actor: actorAccountId };
   }
@@ -1627,7 +1723,7 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     }
     // Top-level actions next to branches are setup actions: they run
     // unconditionally, before the branching, so they come first with no parent
-    // and the container goes last.
+    // and the container goes last. Optional: most rules have none.
     const setupActions = spec.actions ?? [];
     if (!Array.isArray(setupActions)) {
       throw new Error('actions must be an array.');
@@ -1637,6 +1733,10 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       buildBranchContainer(spec.branches, null, context),
     ];
   } else {
+    // Optional: a rule with no conditions at all is legitimate ("on every new
+    // issue, do X"). Absent actions are left as they were: at least one
+    // condition or action is required below, and existing callers build
+    // condition-only rules.
     const [block] = buildBranchBlocks([{
       conditions: spec.conditions || [],
       actions: spec.actions || [],
@@ -1649,7 +1749,10 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
     rule: {
       name,
       state: 'DISABLED',
+      // Optional: a free-text note for people reading the rule list.
       description: typeof spec.description === 'string' ? spec.description : '',
+      // The next four are fixed rule settings copied from the verified exports,
+      // not values taken from the request, so there is nothing to ask for.
       canOtherRuleTrigger: true,
       notifyOnError: 'FIRSTERROR',
       // Required by the API. Without an actor the create request fails with a
@@ -1667,6 +1770,7 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       },
       components,
       ruleScopeARIs: [scope],
+      // Optional: labels are only for finding the rule later.
       labels: Array.isArray(spec.labels) ? spec.labels : [],
       writeAccessType: 'UNRESTRICTED',
       collaborators: [],
@@ -1704,7 +1808,17 @@ function buildBranchContainer(branches, parentId, context, path = 'branches') {
     if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
       throw new Error(`${path}[${index}] must be an object.`);
     }
-    const branchConditions = branch.conditions ?? [];
+    // An omitted "conditions" would silently turn this branch into the else.
+    // The else must be asked for with an explicit empty list.
+    if (branch.conditions === undefined) {
+      throw new Error(
+        `${path}[${index}] has no "conditions". Send the conditions for this case, or an empty ` +
+          'list "conditions": [] if it is the else, the case that applies when no other case does.'
+      );
+    }
+    const branchConditions = branch.conditions;
+    // Optional: a branch that only splits further has no actions of its own
+    // (checked below that it then has nested branches).
     const branchActions = branch.actions ?? [];
     if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
       throw new Error(`${path}[${index}] conditions and actions must be arrays.`);
@@ -1766,6 +1880,15 @@ function buildBranchBlocks(branchSpecs, actionsUnderBlock, { projectId, fieldMet
       throw new Error('Provide at least one condition or action.');
     }
 
+    // With two or more conditions, ALL ("every one") and ANY ("at least one")
+    // build different rules, so the requester must have chosen. With one
+    // condition or none the two are the same, so ALL is just a placeholder.
+    if (!branchSpec.conditionMatchType && conditions.length > 1) {
+      throw new Error(
+        'This case has more than one condition, but the requester did not say whether ALL of them ' +
+          'must be true or just ANY one. Ask them, then send conditionMatchType "ALL" or "ANY".'
+      );
+    }
     const conditionMatchType = branchSpec.conditionMatchType || 'ALL';
     if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
       throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
@@ -1853,6 +1976,9 @@ function buildAction(action, parentId, fieldMetadata, projectId) {
     );
   }
 
+  // Not a silent default: an action that needs a value but got none fails the
+  // checks below by naming the missing key (assertVerifiedComponentValue, or
+  // the webhook url and edit fields checks), so {} never reaches the API.
   let value = action.value ?? {};
   if (action.type === 'jira.issue.outgoing.webhook') {
     value = buildWebhookValue(value);
@@ -1905,8 +2031,9 @@ function buildAction(action, parentId, fieldMetadata, projectId) {
       advancedFields: numericFields.length > 0
         ? buildAdvancedNumericFields(numericFields)
         : null,
-      // Matches the confirmed working rule's value. Explicit `false` in the
-      // spec opts out; anything else (including omitted) keeps this default.
+      // Optional. Matches the confirmed working rule's value, and is what Jira's
+      // own edit action does: people watching the issue are told of the change.
+      // Explicit `false` in the spec opts out; anything else (including omitted) keeps this default.
       sendNotifications: value.sendNotifications !== false,
     };
   }

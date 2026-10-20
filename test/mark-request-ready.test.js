@@ -274,3 +274,11 @@ test('the webhook URL and its secret never appear in logs or results', async () 
 test('scrubUrls removes every URL from error text', () => {
   assert.equal(scrubUrls(`failed: ${WEBHOOK_URL} (x)`), 'failed: [redacted url] (x)');
 });
+
+test('webhook mode puts the target project on the posted card', async () => {
+  const { posts, markRequestReady } = setup({ mode: 'webhook', env: WEBHOOK_ENV });
+  await markRequestReady('SOC-145', 'SOC', { projectName: 'SOCDemo', projectId: '10100' });
+
+  const facts = JSON.parse(posts[0].init.body).attachments[0].content.body[1].facts;
+  assert.deepEqual(facts[2], { title: 'Target project', value: 'SOCDemo (ID 10100)' });
+});

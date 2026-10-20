@@ -37,6 +37,16 @@ modules:
             customfield_11639 (number/float) and Time to first response is
             customfield_10049 (SLA). To convert the SLA's elapsed milliseconds
             to decimal minutes, use a Jira math expression dividing by 60000.
+        requestText:
+          title: Requester's message
+          type: string
+          required: true
+          description: |
+            The requester's message exactly as they wrote it, word for word.
+            Not a summary and not your rewording. Shown to the approving
+            manager, and checked for words that describe more than one case
+            (such as "otherwise"): if the draft has fewer branches than that
+            request describes, the call is refused.
         requestSummary:
           title: Request summary
           type: string

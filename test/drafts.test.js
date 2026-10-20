@@ -5,6 +5,9 @@ import { createDraftStore, DRAFT_STATES } from '../src/draft-store.js';
 import { digestRule } from '../src/draft-render.js';
 import { adfText, APPROVAL_ENV, APPROVAL_IDS, fakeJira, fakeStorage, PROJECT_STATUSES, preparedOk } from './fakes.js';
 
+// What the requester wrote, as the agent sends it. No branch word in it.
+const REQUEST = 'Log a message whenever an issue is created in SOCDemo.';
+
 function setup({
   jiraOverrides,
   prepare = preparedOk(),
@@ -26,6 +29,7 @@ function setup({
 test('draft raises a ticket, freezes the rule and says plainly that nothing was created', async () => {
   const { store, jira, actions } = setup();
   const result = await actions.draftAutomationRule({
+    requestText: REQUEST,
     ruleSpec: '{}',
     requestSummary: 'Log a message when an issue is created',
     context: { accountId: 'me-1' },
@@ -56,11 +60,67 @@ test('draft raises a ticket, freezes the rule and says plainly that nothing was 
   assert.ok(adfText(draftComment.body).includes(stored.digest));
 });
 
+test('a draft without requestText is refused and raises no ticket', async () => {
+  const { jira, actions } = setup();
+  for (const requestText of [undefined, '', '   ', 42]) {
+    const result = await actions.draftAutomationRule({ requestText, ruleSpec: '{}' });
+    assert.equal(result.ok, false);
+    assert.equal(result.draftSubmitted, false);
+    assert.match(result.error, /requester's message was not provided/);
+  }
+  assert.equal(jira.calls.createIssue.length, 0);
+});
+
+test('requestText is stored on the ticket and with the draft, and prepare receives it', async () => {
+  const seen = [];
+  const prepare = async (payload) => { seen.push(payload.requestText); return preparedOk()(); };
+  const { store, jira, actions } = setup({ prepare });
+  const text = 'Escalate P1 tickets unless they are already assigned.';
+  await actions.draftAutomationRule({ requestText: `  ${text}  `, ruleSpec: '{}' });
+
+  assert.deepEqual(seen, [text]);
+  const description = adfText(jira.calls.createIssue[0].description);
+  assert.ok(description.includes(text));
+  assert.match(description, /Requester's message, as sent by the agent/);
+  assert.equal((await store.getDraft('20001')).requestText, text);
+});
+
+test('the project name and ID are the first thing on the ticket, above the request, and on the draft comment', async () => {
+  const { jira, actions } = setup();
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}', requestSummary: 'summary' });
+
+  const description = adfText(jira.calls.createIssue[0].description);
+  assert.match(description, /^Target project:\s+SOCDemo \(ID 10449\)/);
+  assert.ok(description.indexOf('SOCDemo (ID 10449)') < description.indexOf(REQUEST));
+  assert.match(adfText(jira.calls.addComment[0].body), /Project:\s+SOCDemo \(ID 10449\)/);
+});
+
+test('a project given by id alone is shown as an id, not as a made-up name', async () => {
+  const rule = (await preparedOk()()).rule;
+  const prepare = async () => ({ ok: true, rule, scope: rule.ruleScopeARIs[0], cloudId: 'test-cloud' });
+  const { jira, actions } = setup({ prepare });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.match(adfText(jira.calls.createIssue[0].description), /Target project:\s+ID 10449 \(the draft gave no project name\)/);
+});
+
+test('a revision is checked against the stored requestText, and a refusal changes nothing', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const seen = [];
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, getEnv: () => APPROVAL_ENV,
+    prepare: async (payload) => { seen.push(payload.requestText); return { ok: false, error: 'refused' }; },
+  });
+  const result = await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}', requestText: 'ignored' });
+  assert.equal(result.ok, false);
+  assert.deepEqual(seen, [REQUEST]);
+  assert.equal((await ctx.store.getDraft('20001')).version, 1);
+});
+
 test('a draft that fails validation raises no ticket', async () => {
   const { jira, actions } = setup({
     prepare: async () => ({ ok: false, error: 'trigger.fields must contain at least one Jira field name.' }),
   });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.equal(result.ruleCreated, false);
   assert.equal(result.draftSubmitted, false);
@@ -69,7 +129,7 @@ test('a draft that fails validation raises no ticket', async () => {
 
 test('missing approval configuration is reported by name', async () => {
   const { actions } = setup({ env: { ...APPROVAL_ENV, APPROVED_STATUS_NAME: '', RESUBMIT_TRANSITION_NAME: undefined } });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.match(result.error, /APPROVED_STATUS_NAME, RESUBMIT_TRANSITION_NAME/);
 });
@@ -85,7 +145,7 @@ test('draft secrets are redacted in the ticket comment and the attachment', asyn
     return { ok: true, rule, scope: rule.ruleScopeARIs[0], cloudId: 'test-cloud' };
   };
   const { jira, actions } = setup({ prepare });
-  await actions.draftAutomationRule({ ruleSpec: '{}' });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.ok(!JSON.stringify(jira.calls.addComment).includes('SUPERSECRET'));
   assert.ok(!jira.calls.addAttachment[0].content.includes('SUPERSECRET'));
   assert.match(jira.calls.addAttachment[0].content, /\[redacted\]/);
@@ -93,7 +153,7 @@ test('draft secrets are redacted in the ticket comment and the attachment', asyn
 
 test('the full payload is attached as a versioned file and kept out of the comment', async () => {
   const { store, jira, actions } = setup();
-  await actions.draftAutomationRule({ ruleSpec: '{}' });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   const stored = await store.getDraft('20001');
 
   const [attachment] = jira.calls.addAttachment;
@@ -110,7 +170,7 @@ test('a failed upload still submits the draft, with a warning and an honest comm
   const { store, jira, actions } = setup({
     jiraOverrides: { addAttachment: () => { throw new Error('HTTP 403 attachments disabled'); } },
   });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
 
   assert.equal(result.ok, true);
   assert.equal(result.draftSubmitted, true);
@@ -123,7 +183,7 @@ test('a failed upload still submits the draft, with a warning and an honest comm
 
 test('the ticket is created unassigned, with the issue type resolved from its name', async () => {
   const { store, jira, actions } = setup();
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}', approverAccountId: 'manager-1' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}', approverAccountId: 'manager-1' });
 
   assert.equal(result.ok, true);
   assert.equal('assignedTo' in result, false);
@@ -140,7 +200,7 @@ test('names match ignoring case and outer spaces, only within the approval issue
   const { jira, actions } = setup({
     env: { ...APPROVAL_ENV, APPROVAL_ISSUE_TYPE_NAME: ' automation REQUEST ', APPROVED_STATUS_NAME: 'Done' },
   });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.match(result.error, /APPROVED_STATUS_NAME is "Done", but nothing with that name exists in the Automation Request workflow/);
   assert.equal(jira.calls.createIssue.length, 0);
@@ -148,7 +208,7 @@ test('names match ignoring case and outer spaces, only within the approval issue
 
 test('an unknown issue type name raises no ticket and names the variable', async () => {
   const { jira, actions } = setup({ env: { ...APPROVAL_ENV, APPROVAL_ISSUE_TYPE_NAME: 'Approval' } });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.match(result.error, /APPROVAL_ISSUE_TYPE_NAME is "Approval", but nothing with that name exists in project AUTOAPR/);
   assert.equal(jira.calls.createIssue.length, 0);
@@ -158,7 +218,7 @@ test('a status name shared by two statuses is refused rather than guessed', asyn
   const [decoy, approvalType] = PROJECT_STATUSES;
   const duplicated = { ...approvalType, statuses: [...approvalType.statuses, { id: '10299', name: 'approved' }] };
   const { jira, actions } = setup({ jiraOverrides: { getProjectStatuses: () => [decoy, duplicated] } });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.match(result.error, /APPROVED_STATUS_NAME is "Approved", but 2 items share that name/);
   assert.equal(jira.calls.createIssue.length, 0);
@@ -166,7 +226,7 @@ test('a status name shared by two statuses is refused rather than guessed', asyn
 
 test('a failed workflow read raises no ticket', async () => {
   const { jira, actions } = setup({ jiraOverrides: { getProjectStatuses: () => { throw new Error('HTTP 404'); } } });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.equal(result.ok, false);
   assert.match(result.error, /workflow of project AUTOAPR could not be read: HTTP 404/);
   assert.equal(jira.calls.createIssue.length, 0);
@@ -180,7 +240,7 @@ function liveIssue(statusId, projectKey = 'AUTOAPR') {
 
 async function seededRevise(statusId, opts = {}) {
   const ctx = setup({ jiraOverrides: { getIssue: liveIssue(statusId, opts.projectKey), ...opts.jiraOverrides } });
-  await ctx.actions.draftAutomationRule({ ruleSpec: '{}' });
+  await ctx.actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   ctx.jira.calls.addComment.length = 0;
   return ctx;
 }
@@ -260,7 +320,7 @@ test('a failed resubmit transition still reports the stored draft and the manual
 
 test('a draft marks its new ticket ready, after the attachment, and says delivery is unconfirmed', async () => {
   const { jira, actions, markReadyCalls } = setup();
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
 
   assert.deepEqual(markReadyCalls, [{ issueKey: 'AUTOAPR-7', projectKey: 'AUTOAPR' }]);
   assert.equal(jira.calls.addAttachment.length, 1);
@@ -273,7 +333,7 @@ test('a ticket that could not be marked still submits the draft and tells the us
   const { actions } = setup({
     readyResult: { ok: false, marked: false, error: 'no draft attached; not marking ready', notificationSent: false },
   });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
 
   assert.equal(result.ok, true);
   assert.equal(result.draftSubmitted, true);
@@ -286,7 +346,7 @@ test('when the heads-up was accepted but labelling failed, the message says it m
   const { actions } = setup({
     readyResult: { ok: false, marked: false, error: 'labels failed', notificationSent: true },
   });
-  const result = await actions.draftAutomationRule({ ruleSpec: '{}' });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
 
   assert.match(result.message, /may already have been sent/);
   assert.doesNotMatch(result.message, /No heads-up was triggered/);
@@ -294,7 +354,7 @@ test('when the heads-up was accepted but labelling failed, the message says it m
 
 test('a revision does not mark the ticket again', async () => {
   const ctx = setup({ jiraOverrides: { getIssue: liveIssue(APPROVAL_IDS.changesRequestedStatus) } });
-  await ctx.actions.draftAutomationRule({ ruleSpec: '{}' });
+  await ctx.actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   const result = await ctx.actions.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
 
   assert.equal(result.ok, true);

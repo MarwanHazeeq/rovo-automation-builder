@@ -127,10 +127,10 @@ export function sampleRule(name = 'Notify on P1') {
   };
 }
 
-/** A prepare() stub that succeeds with sampleRule(). */
+/** A prepare() stub that succeeds with sampleRule(); the project is "SOCDemo". */
 export function preparedOk(name) {
   const rule = sampleRule(name);
-  return async () => ({ ok: true, rule, scope: rule.ruleScopeARIs[0], cloudId: 'test-cloud' });
+  return async () => ({ ok: true, rule, scope: rule.ruleScopeARIs[0], cloudId: 'test-cloud', projectName: 'SOCDemo' });
 }
 
 /** Concatenate every text node in an ADF document, for simple assertions. */

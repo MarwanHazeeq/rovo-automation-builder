@@ -1,5 +1,6 @@
 import { redactSecrets, safeStringify } from './index.js';
 import { createJiraClient } from './jira-client.js';
+import { projectLine } from './draft-render.js';
 
 /**
  * Marks an approval ticket "ready for review" so the manager gets a Teams
@@ -54,10 +55,13 @@ export function createReadyMarker({
    * Mark `issueKey` ready for review. `projectKey` is the approval project
    * (APPROVAL_PROJECT_KEY); tickets anywhere else are refused.
    *
+   * `target` is { projectName, projectId } of the rule's project, shown on
+   * the Teams card; the card omits the line when it is not given.
+   *
    * Never throws: every outcome is a result object, because the caller has
    * already raised the ticket and must not fail because of the heads-up.
    */
-  async function markRequestReady(issueKey, projectKey) {
+  async function markRequestReady(issueKey, projectKey, target) {
     // The base result. Every return below fills in what actually happened.
     const result = {
       ok: false,
@@ -125,6 +129,7 @@ export function createReadyMarker({
       issueKey,
       summary: issue.fields.summary,
       requestedBy: issue.fields.reporter?.displayName,
+      targetProject: target?.projectId ? projectLine(target.projectName, target.projectId) : null,
       siteUrl: String(env.JIRA_SITE_URL).trim(),
     });
     const posted = await postCard(String(env.TEAMS_WEBHOOK_URL).trim(), card);
@@ -231,7 +236,7 @@ export function createReadyMarker({
  * Teams Workflows' "Post card in a chat or channel" expects. Built as an
  * object and serialised once, never by string concatenation.
  */
-export function buildCard({ issueKey, summary, requestedBy, siteUrl }) {
+export function buildCard({ issueKey, summary, requestedBy, targetProject, siteUrl }) {
   return {
     type: 'message',
     attachments: [
@@ -249,6 +254,7 @@ export function buildCard({ issueKey, summary, requestedBy, siteUrl }) {
               facts: [
                 { title: 'Ticket', value: issueKey },
                 { title: 'Summary', value: String(summary ?? '') },
+                ...(targetProject ? [{ title: 'Target project', value: targetProject }] : []),
                 { title: 'Requested by', value: String(requestedBy ?? 'unknown') },
               ],
             },

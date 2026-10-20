@@ -794,7 +794,9 @@ const STRUCTURAL_LIBRARY = {
     notes:
       'INPUT CONTRACT: never send this component. Put a `branches` array in the ruleSpec (next to ' +
       'trigger) and the builder wraps the branches in ONE container itself. Each branch is ' +
-      '{ conditionMatchType?, conditions, actions?, branches? }. Top-level `actions` next to ' +
+      '{ conditionMatchType?, conditions, actions?, branches? }. `conditions` is required (send [] ' +
+      'for the else). `conditionMatchType` (ALL or ANY) is required when a branch has more than one ' +
+      'condition. Top-level `actions` next to ' +
       '`branches` are SETUP actions: they run first, unconditionally, before any branch. Top-level ' +
       '`conditions` next to `branches` are rejected. A branch may carry its own `branches` (any ' +
       'depth); inside it, its actions run first, then the nested branches. A branch needs actions or ' +
