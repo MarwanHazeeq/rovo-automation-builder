@@ -340,9 +340,11 @@ const ACTION_LIBRARY = {
       'contentType "custom" pairs with customBody (a string, JSON or form-encoded, built from smart values). ' +
       'contentType "empty" (see the TRIGGER_BUILDERS defaults elsewhere) sends no body. ' +
       'Each header needs its own generated id, same free-form style as jira.create.variable\'s id. ' +
-      'The response is read back as {{webhookResponse.*}} -- NOT {{webResponse.*}}, which resolves ' +
-      'empty and fails silently. A second request in the same rule OVERWRITES webhookResponse, so ' +
-      'copy anything still needed into a jira.create.variable step first. ' +
+      'The response is read back as {{webhookResponse.*}} or {{webResponse.*}}; both work on this site ' +
+      '(the hand-built SDP rule uses each). They are NOT interchangeable inside one rule: when a spec ' +
+      'names the accessor for a call, pass it through literally and never normalise one to the other. ' +
+      'A second request in the same rule OVERWRITES the response, so copy anything still needed into ' +
+      'a jira.create.variable step first. ' +
       'Never inline a real secret in headers/customBody in a spec sent to the Rovo agent -- resolve it from a ' +
       'Forge environment variable or a jira.create.variable step instead, the way ClientSecret is handled in the source rule.',
   },

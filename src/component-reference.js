@@ -35,7 +35,8 @@ const USAGE_NOTES = [
     'on jira.condition.container.block.',
   'There is no iteration component. Per issue, use the jira.jql.scheduled trigger. Per list item, ' +
     'use {{#list}}...{{/}} inside a jira.create.variable step.',
-  'Read a web-request response as {{webhookResponse.*}}, never {{webResponse.*}}. A second request ' +
+  'Read a web-request response as {{webhookResponse.*}} or {{webResponse.*}}; when a spec names one, ' +
+    'keep it exactly as written. A second request ' +
     'in the same rule overwrites it.',
 ];
 
