@@ -1610,14 +1610,13 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
   // the id written into a child's parentId is the same string that ends up on
   // the parent object itself.
   const triggerId = randomUUID();
-  const conditionContainerId = randomUUID();
+  const context = { projectId, fieldMetadata };
 
   // `branches` is the general form: one if.block per entry. The flat
   // conditions + actions input is just a single branch, so both go through the
-  // same building code below.
-  const hasBranches = spec.branches !== undefined;
-  let branchSpecs;
-  if (hasBranches) {
+  // same block-building code.
+  let components;
+  if (spec.branches !== undefined) {
     // Two ways of writing the same thing: silently preferring one would drop
     // half of the caller's logic, so refuse.
     if (spec.conditions !== undefined && spec.conditions !== null) {
@@ -1626,89 +1625,24 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
           'branch it belongs to.'
       );
     }
-    if (!Array.isArray(spec.branches) || spec.branches.length === 0) {
-      throw new Error('branches must be a non-empty array.');
+    // Top-level actions next to branches are setup actions: they run
+    // unconditionally, before the branching, so they come first with no parent
+    // and the container goes last.
+    const setupActions = spec.actions ?? [];
+    if (!Array.isArray(setupActions)) {
+      throw new Error('actions must be an array.');
     }
-    branchSpecs = spec.branches.map((branch, index) => {
-      if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
-        throw new Error(`branches[${index}] must be an object.`);
-      }
-      const branchConditions = branch.conditions ?? [];
-      const branchActions = branch.actions ?? [];
-      if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
-        throw new Error(`branches[${index}] conditions and actions must be arrays.`);
-      }
-      // An empty-conditions block is the else: it always matches. Anything
-      // after it can never run, so only the last branch may be one. This also
-      // means there can be at most one else.
-      if (branchConditions.length === 0 && index < spec.branches.length - 1) {
-        throw new Error(
-          `branches[${index}] has no conditions, so it is the else and always matches. ` +
-            'Every later branch would be unreachable; only the last branch may have empty conditions.'
-        );
-      }
-      if (branchActions.length === 0) {
-        throw new Error(`branches[${index}] has no actions; a branch must do something.`);
-      }
-      return {
-        conditions: branchConditions,
-        actions: branchActions,
-        conditionMatchType: branch.conditionMatchType,
-      };
-    });
+    components = [
+      ...setupActions.map((action) => buildAction(action, null, fieldMetadata, projectId)),
+      buildBranchContainer(spec.branches, null, context),
+    ];
   } else {
-    branchSpecs = [{
+    const [block] = buildBranchBlocks([{
       conditions: spec.conditions || [],
       actions: spec.actions || [],
       conditionMatchType: spec.conditionMatchType,
-    }];
-  }
-
-  const branchBlocks = branchSpecs.map((branchSpec) => {
-    // Each branch owns its block id. Its conditions point at it through
-    // conditionParentId and its actions through parentId; sharing one id
-    // between branches would make Jira treat them all as one branch.
-    const blockId = randomUUID();
-    const conditions = branchSpec.conditions.map((condition) =>
-      buildCondition(condition, blockId, fieldMetadata));
-    const hasConditions = conditions.length > 0;
-    // With no conditions in the flat form there is no if-block to hang actions
-    // off, so they sit at the top of `components` with a null parent. Both
-    // shapes are accepted by the API; this one matches what the Automation UI
-    // produces for a rule that has no conditions. A branch is always a block.
-    const actions = branchSpec.actions.map((action) =>
-      buildAction(action, hasConditions || hasBranches ? blockId : null, fieldMetadata, projectId));
-
-    if (!hasConditions && actions.length === 0) {
-      throw new Error('Provide at least one condition or action.');
-    }
-
-    const conditionMatchType = branchSpec.conditionMatchType || 'ALL';
-    if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
-      throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
-    }
-    return { blockId, conditions, actions, hasConditions, conditionMatchType };
-  });
-
-  let components;
-  if (hasBranches || branchBlocks[0].hasConditions) {
-    const conditionBlocks = branchBlocks.map((branch) => {
-      const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
-        conditionMatchType: branch.conditionMatchType,
-      }, { id: branch.blockId, parentId: conditionContainerId });
-      conditionBlock.conditions = branch.conditions;
-      conditionBlock.children = branch.actions;
-      return conditionBlock;
-    });
-
-    const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
-      id: conditionContainerId,
-    });
-    conditionContainer.children = conditionBlocks;
-
-    components = [conditionContainer];
-  } else {
-    components = branchBlocks[0].actions;
+    }], false, context);
+    components = block.hasConditions ? [assembleBranchContainer([block], null)] : block.actions;
   }
 
   return {
@@ -1738,6 +1672,100 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       collaborators: [],
     },
   };
+}
+
+/**
+ * Build ONE jira.condition.container.block holding one if.block per entry in
+ * `branches` (validated here). `parentId` is the id of the component the
+ * container hangs under: null at the top level of a rule, or the id of an
+ * enclosing if.block when a container is nested inside a branch.
+ * `context` is { projectId, fieldMetadata }, passed through to the builders.
+ */
+function buildBranchContainer(branches, parentId, context) {
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw new Error('branches must be a non-empty array.');
+  }
+  const branchSpecs = branches.map((branch, index) => {
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
+      throw new Error(`branches[${index}] must be an object.`);
+    }
+    const branchConditions = branch.conditions ?? [];
+    const branchActions = branch.actions ?? [];
+    if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
+      throw new Error(`branches[${index}] conditions and actions must be arrays.`);
+    }
+    // An empty-conditions block is the else: it always matches. Anything
+    // after it can never run, so only the last branch may be one. This also
+    // means there can be at most one else.
+    if (branchConditions.length === 0 && index < branches.length - 1) {
+      throw new Error(
+        `branches[${index}] has no conditions, so it is the else and always matches. ` +
+          'Every later branch would be unreachable; only the last branch may have empty conditions.'
+      );
+    }
+    if (branchActions.length === 0) {
+      throw new Error(`branches[${index}] has no actions; a branch must do something.`);
+    }
+    return {
+      conditions: branchConditions,
+      actions: branchActions,
+      conditionMatchType: branch.conditionMatchType,
+    };
+  });
+  return assembleBranchContainer(buildBranchBlocks(branchSpecs, true, context), parentId);
+}
+
+/**
+ * Turn validated branch specs into built conditions and actions, each branch
+ * with its own block id. `actionsUnderBlock` is false only for the flat input
+ * with no conditions, where there is no if-block to hang actions off.
+ */
+function buildBranchBlocks(branchSpecs, actionsUnderBlock, { projectId, fieldMetadata }) {
+  return branchSpecs.map((branchSpec) => {
+    // Each branch owns its block id. Its conditions point at it through
+    // conditionParentId and its actions through parentId; sharing one id
+    // between branches would make Jira treat them all as one branch.
+    const blockId = randomUUID();
+    const conditions = branchSpec.conditions.map((condition) =>
+      buildCondition(condition, blockId, fieldMetadata));
+    const hasConditions = conditions.length > 0;
+    // With no conditions in the flat form there is no if-block to hang actions
+    // off, so they sit at the top of `components` with a null parent. Both
+    // shapes are accepted by the API; this one matches what the Automation UI
+    // produces for a rule that has no conditions. A branch is always a block.
+    const actions = branchSpec.actions.map((action) =>
+      buildAction(action, hasConditions || actionsUnderBlock ? blockId : null, fieldMetadata, projectId));
+
+    if (!hasConditions && actions.length === 0) {
+      throw new Error('Provide at least one condition or action.');
+    }
+
+    const conditionMatchType = branchSpec.conditionMatchType || 'ALL';
+    if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
+      throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
+    }
+    return { blockId, conditions, actions, hasConditions, conditionMatchType };
+  });
+}
+
+/** Wrap built branch blocks in one container component with the given parent. */
+function assembleBranchContainer(branchBlocks, parentId) {
+  const containerId = randomUUID();
+  const conditionBlocks = branchBlocks.map((branch) => {
+    const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
+      conditionMatchType: branch.conditionMatchType,
+    }, { id: branch.blockId, parentId: containerId });
+    conditionBlock.conditions = branch.conditions;
+    conditionBlock.children = branch.actions;
+    return conditionBlock;
+  });
+
+  const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
+    id: containerId,
+    parentId,
+  });
+  conditionContainer.children = conditionBlocks;
+  return conditionContainer;
 }
 
 /**
