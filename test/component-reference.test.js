@@ -19,6 +19,7 @@ test('no arguments returns an index of every kind plus usage notes', async () =>
   assert.match(notes, /webhookResponse/);
   assert.match(notes, /several condition branches/);
   assert.match(notes, /no iteration component/i);
+  assert.match(notes, /next to `branches`/);
   assert.match(notes, /smart-value expressions/);
 
   assert.ok(result.smartValueTopics.length > 0);
@@ -126,4 +127,16 @@ test('smartValues carries the date-diff operand order and the .toDate requiremen
   // retries them.
   assert.equal(dates.doesNotWork.length, 2);
   assert.ok(dates.doesNotWork.every((v) => v.includes('EMPTY')));
+});
+
+test('the structural reference carries the worked example and the setup/nesting rules', async () => {
+  const result = await getComponentReference({ componentType: 'jira.condition.container.block' });
+
+  assert.match(result.notes, /SETUP actions/);
+  assert.match(result.notes, /rejected/);
+  assert.match(result.notes, /nested branches/);
+  const spec = result.workedExample.ruleSpec;
+  assert.ok(spec.actions.length > 0);
+  assert.equal(spec.branches.length, 2);
+  assert.ok(spec.branches[0].branches.length > 0);
 });

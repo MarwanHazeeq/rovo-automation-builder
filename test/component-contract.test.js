@@ -6,6 +6,7 @@ import {
   ALLOWED_ACTION_TYPES,
   ALLOWED_CONDITION_TYPES,
 } from '../src/index.js';
+import { getComponentReference } from '../src/component-reference.js';
 import {
   TRIGGER_LIBRARY,
   ACTION_LIBRARY,
@@ -76,6 +77,21 @@ for (const [type, entry] of Object.entries(STRUCTURAL_LIBRARY)) {
     assert.equal(rule.components[0].type, 'jira.condition.container.block');
   });
 }
+
+// Every worked example the reference response carries must build too. This
+// walks the real get-component-reference output, so a new one is covered
+// without editing this file.
+test('every workedExample in the reference response is accepted by the builder', async () => {
+  const response = await getComponentReference({ kind: 'structural' });
+  const worked = response.components.filter((component) => component.workedExample);
+  assert.ok(worked.length > 0, 'the structural reference must carry a worked example');
+  for (const component of worked) {
+    const { rule } = build(component.workedExample.ruleSpec);
+    assert.equal(rule.state, 'DISABLED');
+    // Setup actions precede the branch container in the built rule.
+    assert.equal(rule.components.at(-1).type, 'jira.condition.container.block');
+  }
+});
 
 // A trigger's example is the settings sent next to `type`, e.g.
 // { type, fromStatus: [...] }.

@@ -29,7 +29,10 @@ const USAGE_NOTES = [
   'An entry marked verified: false has no confirmed export on this tenant. Do not build with it; ' +
     'say it is unverified and stop.',
   'A rule supports several condition branches through `branches`; the last branch with empty ' +
-    'conditions is the else. Different outcomes for different cases are ONE rule, not several.',
+    'conditions is the else. Different outcomes for different cases are ONE rule, not several. ' +
+    'Steps that always run before the branches go in top-level `actions` next to `branches`; a ' +
+    'branch can hold nested `branches`. Setup then branching is still ONE rule: see workedExample ' +
+    'on jira.condition.container.block.',
   'There is no iteration component. Per issue, use the jira.jql.scheduled trigger. Per list item, ' +
     'use {{#list}}...{{/}} inside a jira.create.variable step.',
   'Read a web-request response as {{webhookResponse.*}}, never {{webResponse.*}}. A second request ' +
@@ -61,6 +64,7 @@ function detail(kind, type, entry) {
   };
   for (const key of [
     'example',
+    'workedExample',
     'builtInternally',
     'verifiedOperators',
     'verifiedMatchTypes',

@@ -794,8 +794,56 @@ const STRUCTURAL_LIBRARY = {
     notes:
       'INPUT CONTRACT: never send this component. Put a `branches` array in the ruleSpec (next to ' +
       'trigger) and the builder wraps the branches in ONE container itself. Each branch is ' +
-      '{ conditionMatchType?, conditions, actions }; do not also send top-level conditions. The ' +
-      'last branch may have empty conditions (the else); no other branch may.',
+      '{ conditionMatchType?, conditions, actions?, branches? }. Top-level `actions` next to ' +
+      '`branches` are SETUP actions: they run first, unconditionally, before any branch. Top-level ' +
+      '`conditions` next to `branches` are rejected. A branch may carry its own `branches` (any ' +
+      'depth); inside it, its actions run first, then the nested branches. A branch needs actions or ' +
+      'nested branches. The last branch at each level may have empty conditions (the else); no ' +
+      'other branch may. See workedExample.',
+    workedExample: {
+      description:
+        'ONE rule: log and set a variable always, then two sibling branches, the first holding a ' +
+        'nested if/else.',
+      ruleSpec: {
+        name: 'Worked example: setup actions, branches, nesting',
+        trigger: { type: 'jira.issue.event.trigger:created' },
+        actions: [
+          { type: 'codebarrel.action.log', value: 'always runs first' },
+          {
+            type: 'jira.create.variable',
+            value: {
+              id: '_customsmartvalue_id_1758073090008',
+              name: { type: 'FREE', value: 'Priority' },
+              type: 'SMART',
+              query: { type: 'SMART', value: '{{issue.priority.name}}' },
+              lazy: false,
+            },
+          },
+        ],
+        branches: [
+          {
+            conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+            actions: [{ type: 'codebarrel.action.log', value: 'high priority' }],
+            branches: [
+              {
+                conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.reporter.displayName}}', operator: 'EQUALS', second: 'Pat' } }],
+                actions: [{ type: 'codebarrel.action.log', value: 'high priority from Pat' }],
+              },
+              { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'high priority from anyone else' }] },
+            ],
+          },
+          {
+            conditions: [],
+            actions: [
+              {
+                type: 'jira.issue.comment',
+                value: { comment: 'Not high priority', publicComment: false, commentVisibility: null, sendNotifications: true, addCommentOnce: true },
+              },
+            ],
+          },
+        ],
+      },
+    },
     builtInternally: {
       description:
         'NOT AN INPUT. The builder PRODUCES this wrapper from `branches`, kept as evidence of the exported shape.',
