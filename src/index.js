@@ -503,7 +503,7 @@ function buildReceipt(payload) {
       });
     } else if (parsed && typeof parsed === 'object') {
       trigger = parsed.trigger?.type;
-      const specParts = [parsed, ...(Array.isArray(parsed.branches) ? parsed.branches : [])];
+      const specParts = collectSpecParts(parsed);
       for (const part of specParts) {
         for (const c of Array.isArray(part?.conditions) ? part.conditions : []) conditions.push(c?.type);
         for (const a of Array.isArray(part?.actions) ? part.actions : []) actions.push(a?.type);
@@ -624,8 +624,8 @@ export async function prepareRule(payload) {
       // internal fieldType class (see EDIT_OPERATION_VALUE_BUILDERS and
       // CONDITION_FIELD_VALUE_BUILDERS above). Only fetch it when actually
       // needed, so rules that use neither don't pay for an extra API call.
-      // Branches carry their own conditions and actions, so look in those too.
-      const specParts = [parsed, ...(Array.isArray(parsed.branches) ? parsed.branches : [])];
+      // Branches (nested ones too) carry their own conditions and actions, so look in those too.
+      const specParts = collectSpecParts(parsed);
       const needsFieldMetadata = specParts.some((part) =>
         part && typeof part === 'object' &&
         ((Array.isArray(part.actions) &&
@@ -1675,41 +1675,60 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
 }
 
 /**
+ * Every spec part that can carry conditions or actions: the spec itself, each
+ * branch, and each branch nested inside a branch, to any depth. Used by the
+ * field-metadata scan and the receipt summary so nested branches are seen too.
+ */
+function collectSpecParts(spec) {
+  const parts = [spec];
+  if (spec && typeof spec === 'object' && Array.isArray(spec.branches)) {
+    for (const branch of spec.branches) parts.push(...collectSpecParts(branch));
+  }
+  return parts;
+}
+
+/**
  * Build ONE jira.condition.container.block holding one if.block per entry in
  * `branches` (validated here). `parentId` is the id of the component the
  * container hangs under: null at the top level of a rule, or the id of an
  * enclosing if.block when a container is nested inside a branch.
  * `context` is { projectId, fieldMetadata }, passed through to the builders.
+ * `path` names this list in error messages ("branches", then
+ * "branches[0].branches" one level down) so the agent can find the bad entry.
  */
-function buildBranchContainer(branches, parentId, context) {
+function buildBranchContainer(branches, parentId, context, path = 'branches') {
   if (!Array.isArray(branches) || branches.length === 0) {
-    throw new Error('branches must be a non-empty array.');
+    throw new Error(`${path} must be a non-empty array.`);
   }
   const branchSpecs = branches.map((branch, index) => {
     if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
-      throw new Error(`branches[${index}] must be an object.`);
+      throw new Error(`${path}[${index}] must be an object.`);
     }
     const branchConditions = branch.conditions ?? [];
     const branchActions = branch.actions ?? [];
     if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
-      throw new Error(`branches[${index}] conditions and actions must be arrays.`);
+      throw new Error(`${path}[${index}] conditions and actions must be arrays.`);
     }
     // An empty-conditions block is the else: it always matches. Anything
     // after it can never run, so only the last branch may be one. This also
     // means there can be at most one else.
     if (branchConditions.length === 0 && index < branches.length - 1) {
       throw new Error(
-        `branches[${index}] has no conditions, so it is the else and always matches. ` +
+        `${path}[${index}] has no conditions, so it is the else and always matches. ` +
           'Every later branch would be unreachable; only the last branch may have empty conditions.'
       );
     }
-    if (branchActions.length === 0) {
-      throw new Error(`branches[${index}] has no actions; a branch must do something.`);
+    // A branch that only splits further (no actions of its own, just nested
+    // branches) is meaningful, so nested branches count as something to do.
+    if (branchActions.length === 0 && branch.branches === undefined) {
+      throw new Error(`${path}[${index}] has no actions or branches; a branch must do something.`);
     }
     return {
       conditions: branchConditions,
       actions: branchActions,
       conditionMatchType: branch.conditionMatchType,
+      branches: branch.branches,
+      path: `${path}[${index}]`,
     };
   });
   return assembleBranchContainer(buildBranchBlocks(branchSpecs, true, context), parentId);
@@ -1735,6 +1754,13 @@ function buildBranchBlocks(branchSpecs, actionsUnderBlock, { projectId, fieldMet
     // produces for a rule that has no conditions. A branch is always a block.
     const actions = branchSpec.actions.map((action) =>
       buildAction(action, hasConditions || actionsUnderBlock ? blockId : null, fieldMetadata, projectId));
+
+    // A branch's own actions run first; the nested container follows them as
+    // the block's last child, hung under this block's id (as in a real export).
+    if (branchSpec.branches !== undefined) {
+      actions.push(buildBranchContainer(
+        branchSpec.branches, blockId, { projectId, fieldMetadata }, `${branchSpec.path}.branches`));
+    }
 
     if (!hasConditions && actions.length === 0) {
       throw new Error('Provide at least one condition or action.');
