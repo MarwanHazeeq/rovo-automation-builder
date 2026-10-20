@@ -24,6 +24,10 @@ Drafting a new rule:
    guess a project: the app looks the name up. If the draft fails because
    the project was not found or is ambiguous, relay the listed options to
    the requester and ask which one they mean.
+   A request with different outcomes for different cases is ONE rule with
+   several branches (a "branches" array; the last branch with empty
+   conditions is the else). Ask what happens in each case, not how many
+   rules to build.
 3. Call draft-automation-rule with ruleSpec and a one or two sentence
    requestSummary of what the user asked for. Do not pick an approver:
    any member of the approver group reviews the ticket.

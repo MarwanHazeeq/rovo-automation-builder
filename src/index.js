@@ -503,8 +503,11 @@ function buildReceipt(payload) {
       });
     } else if (parsed && typeof parsed === 'object') {
       trigger = parsed.trigger?.type;
-      for (const c of Array.isArray(parsed.conditions) ? parsed.conditions : []) conditions.push(c?.type);
-      for (const a of Array.isArray(parsed.actions) ? parsed.actions : []) actions.push(a?.type);
+      const specParts = [parsed, ...(Array.isArray(parsed.branches) ? parsed.branches : [])];
+      for (const part of specParts) {
+        for (const c of Array.isArray(part?.conditions) ? part.conditions : []) conditions.push(c?.type);
+        for (const a of Array.isArray(part?.actions) ? part.actions : []) actions.push(a?.type);
+      }
     }
   } catch {
     // A malformed shape just yields a thinner summary; the digest still stands.
@@ -621,11 +624,14 @@ export async function prepareRule(payload) {
       // internal fieldType class (see EDIT_OPERATION_VALUE_BUILDERS and
       // CONDITION_FIELD_VALUE_BUILDERS above). Only fetch it when actually
       // needed, so rules that use neither don't pay for an extra API call.
-      const needsFieldMetadata =
-        (Array.isArray(parsed.actions) &&
-          parsed.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
-        (Array.isArray(parsed.conditions) &&
-          parsed.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'));
+      // Branches carry their own conditions and actions, so look in those too.
+      const specParts = [parsed, ...(Array.isArray(parsed.branches) ? parsed.branches : [])];
+      const needsFieldMetadata = specParts.some((part) =>
+        part && typeof part === 'object' &&
+        ((Array.isArray(part.actions) &&
+          part.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
+        (Array.isArray(part.conditions) &&
+          part.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'))));
       console.log(`[createJiraAutomationRule] field metadata needed: ${needsFieldMetadata}`);
       const fieldMetadata = needsFieldMetadata
         ? await fetchJiraFieldMetadata(configuredCloudId, email, token)
@@ -1604,165 +1610,105 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
   // the id written into a child's parentId is the same string that ends up on
   // the parent object itself.
   const triggerId = randomUUID();
-  const conditionBlockId = randomUUID();
   const conditionContainerId = randomUUID();
-  const conditions = (spec.conditions || []).map((condition) => {
-    if (!condition || !ALLOWED_CONDITION_TYPES.includes(condition.type)) {
-      const received = condition?.type
-        ? `"${condition.type}"`
-        : condition
-          ? 'a condition with no "type"'
-          : 'a null/undefined condition';
+
+  // `branches` is the general form: one if.block per entry. The flat
+  // conditions + actions input is just a single branch, so both go through the
+  // same building code below.
+  const hasBranches = spec.branches !== undefined;
+  let branchSpecs;
+  if (hasBranches) {
+    // Two ways of writing the same thing: silently preferring one would drop
+    // half of the caller's logic, so refuse.
+    if (spec.conditions !== undefined && spec.conditions !== null) {
       throw new Error(
-        `conditions[] received ${received}, which is not a verified condition type. ` +
-          `Allowed: ${ALLOWED_CONDITION_TYPES.join(', ')}.`
+        'ruleSpec has both "branches" and top-level "conditions". Put each condition inside the ' +
+          'branch it belongs to.'
       );
     }
-    // Use the type the caller actually asked for. Forcing every condition to
-    // be a comparator produced a comparator component holding an issue
-    // condition's value, which the API cannot parse.
-    let value = condition.value;
-    if (condition.type === 'jira.issue.condition') {
-      // Same problem as jira.issue.edit: the internal shape (field-by-NAME
-      // plus a selectedFieldType) is not something a prompt or an LLM can
-      // reliably invent, so it's built here from real tenant field metadata.
-      if (!fieldMetadata) {
-        throw new Error('Field metadata was not loaded for a jira.issue.condition.');
+    if (!Array.isArray(spec.branches) || spec.branches.length === 0) {
+      throw new Error('branches must be a non-empty array.');
+    }
+    branchSpecs = spec.branches.map((branch, index) => {
+      if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
+        throw new Error(`branches[${index}] must be an object.`);
       }
-      value = buildIssueFieldCondition(condition.value, fieldMetadata);
-    }
-    assertVerifiedComponentValue('condition', condition.type, value);
-    return component('CONDITION', condition.type, value, {
-      conditionParentId: conditionBlockId,
-      schemaVersion:
-        condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] ||
-        CONDITION_LIBRARY[condition.type]?.schemaVersion || 1,
-    });
-  });
-
-  const hasConditions = conditions.length > 0;
-
-  const actions = (spec.actions || []).map((action) => {
-    if (!action || !ALLOWED_ACTION_TYPES.includes(action.type)) {
-      // Name what was rejected, not just what is allowed. Without the offending
-      // type the caller cannot tell which of a dozen actions was wrong, and
-      // neither can anyone reading the logs afterwards.
-      const received = action?.type
-        ? `"${action.type}"`
-        : action
-          ? 'an action with no "type"'
-          : 'a null/undefined action';
-      throw new Error(
-        `actions[] received ${received}, which is not a verified action type. ` +
-          `Allowed: ${ALLOWED_ACTION_TYPES.join(', ')}.`
-      );
-    }
-
-    let value = action.value ?? {};
-    if (action.type === 'jira.issue.outgoing.webhook') {
-      value = buildWebhookValue(value);
-    }
-    if (action.type === 'jira.issue.edit') {
-      // The internal `operations` shape - field-by-NAME plus a fieldType
-      // class Jira's UI needs to populate "Choose fields to set..." - is not
-      // something a prompt or an LLM can reliably invent, so it is built
-      // here from real tenant field metadata instead of trusting it
-      // directly. Standard select/text fields become operations; Jira float
-      // fields use the numeric advancedFields JSON format from the rule sample.
-      //
-      // `fields` lives inside `value`, same as every other action type here
-      // (log's value.text, comment's value.comment, etc.) - keeping this
-      // action consistent with that convention means the agent does not
-      // have to special-case it.
-      const editFields = normalizeEditFields(value.fields);
-      if (!editFields || editFields.length === 0) {
+      const branchConditions = branch.conditions ?? [];
+      const branchActions = branch.actions ?? [];
+      if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
+        throw new Error(`branches[${index}] conditions and actions must be arrays.`);
+      }
+      // An empty-conditions block is the else: it always matches. Anything
+      // after it can never run, so only the last branch may be one. This also
+      // means there can be at most one else.
+      if (branchConditions.length === 0 && index < spec.branches.length - 1) {
         throw new Error(
-          'jira.issue.edit takes "value.fields" and builds the Jira payload itself - do not ' +
-            'supply "operations" or "advancedFields" directly. Use an array of ' +
-            '{ name or fieldId, value } entries, or an object mapping field names/IDs to values, ' +
-            'e.g. { "fields": { "customfield_11594": "{{#=}}ROUND({{issue.customfield_11594|0}} ' +
-            '+ 1, 2){{/}}" } }. Numeric fields are routed to advancedFields automatically.'
+          `branches[${index}] has no conditions, so it is the else and always matches. ` +
+            'Every later branch would be unreachable; only the last branch may have empty conditions.'
         );
       }
-      if (!fieldMetadata) {
-        throw new Error('Field metadata was not loaded for a jira.issue.edit action.');
+      if (branchActions.length === 0) {
+        throw new Error(`branches[${index}] has no actions; a branch must do something.`);
       }
-      const operations = [];
-      const numericFields = [];
-      for (const fieldSpec of editFields) {
-        const fieldName = editFieldName(fieldSpec);
-        const jiraField = findJiraField(fieldName, fieldMetadata);
-        if (jiraField.schema?.custom === FLOAT_CUSTOM_FIELD_TYPE) {
-          const fieldId = jiraField.key || jiraField.id;
-          if (typeof fieldId !== 'string' || fieldId.trim() === '') {
-            throw new Error(`Numeric field "${fieldName}" has no Jira field ID.`);
-          }
-          numericFields.push({
-            fieldId,
-            value: buildAdvancedNumericValue(fieldSpec.value, fieldName),
-          });
-        } else {
-          operations.push(buildEditOperation(fieldSpec, fieldMetadata, jiraField));
-        }
-      }
-      value = {
-        operations,
-        advancedFields: numericFields.length > 0
-          ? buildAdvancedNumericFields(numericFields)
-          : null,
-        // Matches the confirmed working rule's value. Explicit `false` in the
-        // spec opts out; anything else (including omitted) keeps this default.
-        sendNotifications: value.sendNotifications !== false,
+      return {
+        conditions: branchConditions,
+        actions: branchActions,
+        conditionMatchType: branch.conditionMatchType,
       };
-    }
-
-    if (action.type === 'jira.proforma.form.add.action') {
-      // The form is attached from the rule's OWN project's templates, whatever
-      // the spec says, so a draft cannot reach into another project's forms.
-      value = {
-        ...value,
-        templateFormsConfig: { ...(value.templateFormsConfig || {}), projectId: Number(projectId) },
-      };
-    }
-
-    assertVerifiedComponentValue('action', action.type, value);
-
-    // With no conditions there is no if-block to hang actions off, so they sit
-    // at the top of `components` with a null parent. Both shapes are accepted
-    // by the API; this one matches what the Automation UI produces for a rule
-    // that has no conditions.
-    return component('ACTION', action.type, value, {
-      parentId: hasConditions ? conditionBlockId : null,
-      schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] ||
-        ACTION_LIBRARY[action.type]?.schemaVersion || 1,
     });
+  } else {
+    branchSpecs = [{
+      conditions: spec.conditions || [],
+      actions: spec.actions || [],
+      conditionMatchType: spec.conditionMatchType,
+    }];
+  }
+
+  const branchBlocks = branchSpecs.map((branchSpec) => {
+    // Each branch owns its block id. Its conditions point at it through
+    // conditionParentId and its actions through parentId; sharing one id
+    // between branches would make Jira treat them all as one branch.
+    const blockId = randomUUID();
+    const conditions = branchSpec.conditions.map((condition) =>
+      buildCondition(condition, blockId, fieldMetadata));
+    const hasConditions = conditions.length > 0;
+    // With no conditions in the flat form there is no if-block to hang actions
+    // off, so they sit at the top of `components` with a null parent. Both
+    // shapes are accepted by the API; this one matches what the Automation UI
+    // produces for a rule that has no conditions. A branch is always a block.
+    const actions = branchSpec.actions.map((action) =>
+      buildAction(action, hasConditions || hasBranches ? blockId : null, fieldMetadata, projectId));
+
+    if (!hasConditions && actions.length === 0) {
+      throw new Error('Provide at least one condition or action.');
+    }
+
+    const conditionMatchType = branchSpec.conditionMatchType || 'ALL';
+    if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
+      throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
+    }
+    return { blockId, conditions, actions, hasConditions, conditionMatchType };
   });
 
-  if (!hasConditions && actions.length === 0) {
-    throw new Error('Provide at least one condition or action.');
-  }
-
-  const conditionMatchType = spec.conditionMatchType || 'ALL';
-  if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
-    throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
-  }
-
   let components;
-  if (hasConditions) {
-    const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
-      conditionMatchType,
-    }, { id: conditionBlockId, parentId: conditionContainerId });
-    conditionBlock.conditions = conditions;
-    conditionBlock.children = actions;
+  if (hasBranches || branchBlocks[0].hasConditions) {
+    const conditionBlocks = branchBlocks.map((branch) => {
+      const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
+        conditionMatchType: branch.conditionMatchType,
+      }, { id: branch.blockId, parentId: conditionContainerId });
+      conditionBlock.conditions = branch.conditions;
+      conditionBlock.children = branch.actions;
+      return conditionBlock;
+    });
 
     const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
       id: conditionContainerId,
     });
-    conditionContainer.children = [conditionBlock];
+    conditionContainer.children = conditionBlocks;
 
     components = [conditionContainer];
   } else {
-    components = actions;
+    components = branchBlocks[0].actions;
   }
 
   return {
@@ -1792,6 +1738,141 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
       collaborators: [],
     },
   };
+}
+
+/**
+ * Build one condition component for the if-block whose id is `blockId`.
+ * `fieldMetadata` is only consulted for jira.issue.condition.
+ */
+function buildCondition(condition, blockId, fieldMetadata) {
+  if (!condition || !ALLOWED_CONDITION_TYPES.includes(condition.type)) {
+    const received = condition?.type
+      ? `"${condition.type}"`
+      : condition
+        ? 'a condition with no "type"'
+        : 'a null/undefined condition';
+    throw new Error(
+      `conditions[] received ${received}, which is not a verified condition type. ` +
+        `Allowed: ${ALLOWED_CONDITION_TYPES.join(', ')}.`
+    );
+  }
+  // Use the type the caller actually asked for. Forcing every condition to
+  // be a comparator produced a comparator component holding an issue
+  // condition's value, which the API cannot parse.
+  let value = condition.value;
+  if (condition.type === 'jira.issue.condition') {
+    // Same problem as jira.issue.edit: the internal shape (field-by-NAME
+    // plus a selectedFieldType) is not something a prompt or an LLM can
+    // reliably invent, so it's built here from real tenant field metadata.
+    if (!fieldMetadata) {
+      throw new Error('Field metadata was not loaded for a jira.issue.condition.');
+    }
+    value = buildIssueFieldCondition(condition.value, fieldMetadata);
+  }
+  assertVerifiedComponentValue('condition', condition.type, value);
+  return component('CONDITION', condition.type, value, {
+    conditionParentId: blockId,
+    schemaVersion:
+      condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] ||
+      CONDITION_LIBRARY[condition.type]?.schemaVersion || 1,
+  });
+}
+
+/**
+ * Build one action component whose parent is `parentId` (an if-block id, or
+ * null for a top-level action). `fieldMetadata` is only consulted for
+ * jira.issue.edit; `projectId` pins form actions to the rule's own project.
+ */
+function buildAction(action, parentId, fieldMetadata, projectId) {
+  if (!action || !ALLOWED_ACTION_TYPES.includes(action.type)) {
+    // Name what was rejected, not just what is allowed. Without the offending
+    // type the caller cannot tell which of a dozen actions was wrong, and
+    // neither can anyone reading the logs afterwards.
+    const received = action?.type
+      ? `"${action.type}"`
+      : action
+        ? 'an action with no "type"'
+        : 'a null/undefined action';
+    throw new Error(
+      `actions[] received ${received}, which is not a verified action type. ` +
+        `Allowed: ${ALLOWED_ACTION_TYPES.join(', ')}.`
+    );
+  }
+
+  let value = action.value ?? {};
+  if (action.type === 'jira.issue.outgoing.webhook') {
+    value = buildWebhookValue(value);
+  }
+  if (action.type === 'jira.issue.edit') {
+    // The internal `operations` shape - field-by-NAME plus a fieldType
+    // class Jira's UI needs to populate "Choose fields to set..." - is not
+    // something a prompt or an LLM can reliably invent, so it is built
+    // here from real tenant field metadata instead of trusting it
+    // directly. Standard select/text fields become operations; Jira float
+    // fields use the numeric advancedFields JSON format from the rule sample.
+    //
+    // `fields` lives inside `value`, same as every other action type here
+    // (log's value.text, comment's value.comment, etc.) - keeping this
+    // action consistent with that convention means the agent does not
+    // have to special-case it.
+    const editFields = normalizeEditFields(value.fields);
+    if (!editFields || editFields.length === 0) {
+      throw new Error(
+        'jira.issue.edit takes "value.fields" and builds the Jira payload itself - do not ' +
+          'supply "operations" or "advancedFields" directly. Use an array of ' +
+          '{ name or fieldId, value } entries, or an object mapping field names/IDs to values, ' +
+          'e.g. { "fields": { "customfield_11594": "{{#=}}ROUND({{issue.customfield_11594|0}} ' +
+          '+ 1, 2){{/}}" } }. Numeric fields are routed to advancedFields automatically.'
+      );
+    }
+    if (!fieldMetadata) {
+      throw new Error('Field metadata was not loaded for a jira.issue.edit action.');
+    }
+    const operations = [];
+    const numericFields = [];
+    for (const fieldSpec of editFields) {
+      const fieldName = editFieldName(fieldSpec);
+      const jiraField = findJiraField(fieldName, fieldMetadata);
+      if (jiraField.schema?.custom === FLOAT_CUSTOM_FIELD_TYPE) {
+        const fieldId = jiraField.key || jiraField.id;
+        if (typeof fieldId !== 'string' || fieldId.trim() === '') {
+          throw new Error(`Numeric field "${fieldName}" has no Jira field ID.`);
+        }
+        numericFields.push({
+          fieldId,
+          value: buildAdvancedNumericValue(fieldSpec.value, fieldName),
+        });
+      } else {
+        operations.push(buildEditOperation(fieldSpec, fieldMetadata, jiraField));
+      }
+    }
+    value = {
+      operations,
+      advancedFields: numericFields.length > 0
+        ? buildAdvancedNumericFields(numericFields)
+        : null,
+      // Matches the confirmed working rule's value. Explicit `false` in the
+      // spec opts out; anything else (including omitted) keeps this default.
+      sendNotifications: value.sendNotifications !== false,
+    };
+  }
+
+  if (action.type === 'jira.proforma.form.add.action') {
+    // The form is attached from the rule's OWN project's templates, whatever
+    // the spec says, so a draft cannot reach into another project's forms.
+    value = {
+      ...value,
+      templateFormsConfig: { ...(value.templateFormsConfig || {}), projectId: Number(projectId) },
+    };
+  }
+
+  assertVerifiedComponentValue('action', action.type, value);
+
+  return component('ACTION', action.type, value, {
+    parentId,
+    schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] ||
+      ACTION_LIBRARY[action.type]?.schemaVersion || 1,
+  });
 }
 
 // `id` is pulled out of `extra` first so a caller can supply one. Previously

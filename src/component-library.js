@@ -781,7 +781,26 @@ const STRUCTURAL_LIBRARY = {
       'A pass-through wrapper that holds one or more CONDITION_BLOCK children. Every branching rule has ' +
       'exactly one of these at the point where branching starts; its own value is always empty.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: {},
+    example: {
+      branches: [
+        {
+          conditionMatchType: 'ALL',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+          actions: [{ type: 'codebarrel.action.log', value: 'high priority' }],
+        },
+        { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'everything else' }] },
+      ],
+    },
+    notes:
+      'INPUT CONTRACT: never send this component. Put a `branches` array in the ruleSpec (next to ' +
+      'trigger) and the builder wraps the branches in ONE container itself. Each branch is ' +
+      '{ conditionMatchType?, conditions, actions }; do not also send top-level conditions. The ' +
+      'last branch may have empty conditions (the else); no other branch may.',
+    builtInternally: {
+      description:
+        'NOT AN INPUT. The builder PRODUCES this wrapper from `branches`, kept as evidence of the exported shape.',
+      shape: { value: {}, children: 'the if.block components, in branch order' },
+    },
   },
   'jira.condition.if.block': {
     schemaVersion: 1,
@@ -789,7 +808,21 @@ const STRUCTURAL_LIBRARY = {
       'One if/else-if branch: its `conditions` array holds the test(s), its `children` array holds the ' +
       'actions/conditions that run when the block matches.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: { conditionMatchType: 'ALL' },
+    example: {
+      branches: [
+        {
+          conditionMatchType: 'ANY',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+          actions: [{ type: 'codebarrel.action.log', value: 'escalate' }],
+        },
+        { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'flag' }] },
+      ],
+    },
+    builtInternally: {
+      description:
+        'NOT AN INPUT. The builder PRODUCES one of these per branch, with its own id, from each entry of `branches`.',
+      shape: { value: { conditionMatchType: 'ALL' }, conditions: 'the branch conditions', children: 'the branch actions' },
+    },
     verifiedMatchTypes: ['ALL', 'ANY'],
     notes:
       'ELSE is expressed as a trailing jira.condition.if.block sibling with an EMPTY `conditions` ' +

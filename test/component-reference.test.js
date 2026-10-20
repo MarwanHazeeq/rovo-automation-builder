@@ -17,7 +17,7 @@ test('no arguments returns an index of every kind plus usage notes', async () =>
   // The constraints a value shape cannot convey must travel with the index.
   const notes = result.usageNotes.join(' ');
   assert.match(notes, /webhookResponse/);
-  assert.match(notes, /ONE condition branch/);
+  assert.match(notes, /several condition branches/);
   assert.match(notes, /no iteration component/i);
   assert.match(notes, /smart-value expressions/);
 
