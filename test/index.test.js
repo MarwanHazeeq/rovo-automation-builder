@@ -317,6 +317,9 @@ test('accepts a complete VEVENT string as a schedule escape hatch', async () => 
   assert.equal(createdRule.trigger.value.schedule.rRule, `${rawSchedule}\n`);
 });
 
+// The schedule values a requester must give; the builder supplies none of them.
+const WHEN = { hour: 9, minute: 0, timezone: 'Asia/Singapore' };
+
 test('rejects a scheduled trigger with a missing jql or an invalid schedule', async () => {
   const build = (trigger) => withForgeEnvironment(
     async (url) => {
@@ -333,25 +336,43 @@ test('rejects a scheduled trigger with a missing jql or an invalid schedule', as
     })
   );
 
-  const noJql = await build({ schedule: { days: ['MO'] } });
+  const noJql = await build({ schedule: { ...WHEN, days: ['MO'] } });
   assert.equal(noJql.ok, false);
   assert.match(noJql.error, /trigger\.jql/);
 
-  const badDay = await build({ jql: 'status = Open', schedule: { days: ['FUNDAY'] } });
+  const badDay = await build({ jql: 'status = Open', schedule: { ...WHEN, days: ['FUNDAY'] } });
   assert.equal(badDay.ok, false);
   assert.match(badDay.error, /unrecognized day/);
 
-  const badHour = await build({ jql: 'status = Open', schedule: { hour: 25 } });
+  const badHour = await build({ jql: 'status = Open', schedule: { ...WHEN, days: ['MO'], hour: 25 } });
   assert.equal(badHour.ok, false);
   assert.match(badHour.error, /hour must be an integer between 0 and 23/);
 
-  const badZone = await build({ jql: 'status = Open', schedule: { timezone: 'Mars/Olympus' } });
+  const badZone = await build({ jql: 'status = Open', schedule: { ...WHEN, days: ['MO'], timezone: 'Mars/Olympus' } });
   assert.equal(badZone.ok, false);
   assert.match(badZone.error, /not a recognized IANA time zone/);
 
   const badRaw = await build({ jql: 'status = Open', schedule: 'every monday at 9' });
   assert.equal(badRaw.ok, false);
   assert.match(badRaw.error, /complete iCal VEVENT/);
+
+  // Values the requester must have chosen are refused when absent, in the
+  // requester's words, rather than filled in.
+  const noTime = await build({ jql: 'status = Open', schedule: { days: ['MO'], timezone: 'Asia/Singapore' } });
+  assert.equal(noTime.ok, false);
+  assert.match(noTime.error, /did not say what time of day/);
+
+  const noZone = await build({ jql: 'status = Open', schedule: { days: ['MO'], hour: 9, minute: 0 } });
+  assert.equal(noZone.ok, false);
+  assert.match(noZone.error, /did not say which time zone/);
+
+  const noDays = await build({ jql: 'status = Open', schedule: WHEN });
+  assert.equal(noDays.ok, false);
+  assert.match(noDays.error, /did not say which days of the week/);
+
+  const noSchedule = await build({ jql: 'status = Open' });
+  assert.equal(noSchedule.ok, false);
+  assert.match(noSchedule.error, /did not say what time of day/);
 });
 
 test('still requires eventFilters to match scope for event-driven triggers', async () => {
@@ -396,7 +417,7 @@ test('verification rejects a scheduled rule whose JQL came back rewritten', asyn
       trigger: {
         type: 'jira.jql.scheduled',
         jql: '"Response Time" is EMPTY',
-        schedule: { days: ['MO'] },
+        schedule: { ...WHEN, days: ['MO'] },
       },
       actions: [{ type: 'codebarrel.action.log', value: 'x' }],
     }),

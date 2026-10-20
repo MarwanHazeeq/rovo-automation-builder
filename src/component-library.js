@@ -340,9 +340,11 @@ const ACTION_LIBRARY = {
       'contentType "custom" pairs with customBody (a string, JSON or form-encoded, built from smart values). ' +
       'contentType "empty" (see the TRIGGER_BUILDERS defaults elsewhere) sends no body. ' +
       'Each header needs its own generated id, same free-form style as jira.create.variable\'s id. ' +
-      'The response is read back as {{webhookResponse.*}} -- NOT {{webResponse.*}}, which resolves ' +
-      'empty and fails silently. A second request in the same rule OVERWRITES webhookResponse, so ' +
-      'copy anything still needed into a jira.create.variable step first. ' +
+      'The response is read back as {{webhookResponse.*}} or {{webResponse.*}}; both work on this site ' +
+      '(the hand-built SDP rule uses each). They are NOT interchangeable inside one rule: when a spec ' +
+      'names the accessor for a call, pass it through literally and never normalise one to the other. ' +
+      'A second request in the same rule OVERWRITES the response, so copy anything still needed into ' +
+      'a jira.create.variable step first. ' +
       'Never inline a real secret in headers/customBody in a spec sent to the Rovo agent -- resolve it from a ' +
       'Forge environment variable or a jira.create.variable step instead, the way ClientSecret is handled in the source rule.',
   },
@@ -781,7 +783,79 @@ const STRUCTURAL_LIBRARY = {
       'A pass-through wrapper that holds one or more CONDITION_BLOCK children. Every branching rule has ' +
       'exactly one of these at the point where branching starts; its own value is always empty.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: {},
+    example: {
+      branches: [
+        {
+          conditionMatchType: 'ALL',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+          actions: [{ type: 'codebarrel.action.log', value: 'high priority' }],
+        },
+        { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'everything else' }] },
+      ],
+    },
+    notes:
+      'INPUT CONTRACT: never send this component. Put a `branches` array in the ruleSpec (next to ' +
+      'trigger) and the builder wraps the branches in ONE container itself. Each branch is ' +
+      '{ conditionMatchType?, conditions, actions?, branches? }. `conditions` is required (send [] ' +
+      'for the else). `conditionMatchType` (ALL or ANY) is required when a branch has more than one ' +
+      'condition. Top-level `actions` next to ' +
+      '`branches` are SETUP actions: they run first, unconditionally, before any branch. Top-level ' +
+      '`conditions` next to `branches` are rejected. A branch may carry its own `branches` (any ' +
+      'depth); inside it, its actions run first, then the nested branches. A branch needs actions or ' +
+      'nested branches. The last branch at each level may have empty conditions (the else); no ' +
+      'other branch may. See workedExample.',
+    workedExample: {
+      description:
+        'ONE rule: log and set a variable always, then two sibling branches, the first holding a ' +
+        'nested if/else.',
+      ruleSpec: {
+        name: 'Worked example: setup actions, branches, nesting',
+        trigger: {
+          type: 'jira.issue.event.trigger:created',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'NOT_EQUALS', second: '' } }],
+        },
+        actions: [
+          { type: 'codebarrel.action.log', value: 'always runs first' },
+          {
+            type: 'jira.create.variable',
+            value: {
+              id: '_customsmartvalue_id_1758073090008',
+              name: { type: 'FREE', value: 'Priority' },
+              type: 'SMART',
+              query: { type: 'SMART', value: '{{issue.priority.name}}' },
+              lazy: false,
+            },
+          },
+        ],
+        branches: [
+          {
+            conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+            actions: [{ type: 'codebarrel.action.log', value: 'high priority' }],
+            branches: [
+              {
+                conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.reporter.displayName}}', operator: 'EQUALS', second: 'Pat' } }],
+                actions: [{ type: 'codebarrel.action.log', value: 'high priority from Pat' }],
+              },
+              { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'high priority from anyone else' }] },
+            ],
+          },
+          {
+            conditions: [],
+            actions: [
+              {
+                type: 'jira.issue.comment',
+                value: { comment: 'Not high priority', publicComment: false, commentVisibility: null, sendNotifications: true, addCommentOnce: true },
+              },
+            ],
+          },
+        ],
+      },
+    },
+    builtInternally: {
+      description:
+        'NOT AN INPUT. The builder PRODUCES this wrapper from `branches`, kept as evidence of the exported shape.',
+      shape: { value: {}, children: 'the if.block components, in branch order' },
+    },
   },
   'jira.condition.if.block': {
     schemaVersion: 1,
@@ -789,7 +863,21 @@ const STRUCTURAL_LIBRARY = {
       'One if/else-if branch: its `conditions` array holds the test(s), its `children` array holds the ' +
       'actions/conditions that run when the block matches.',
     source: 'Sample Calculation Automation, Sample Integration Automation, BulkUpdate.txt',
-    example: { conditionMatchType: 'ALL' },
+    example: {
+      branches: [
+        {
+          conditionMatchType: 'ANY',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'EQUALS', second: 'High' } }],
+          actions: [{ type: 'codebarrel.action.log', value: 'escalate' }],
+        },
+        { conditions: [], actions: [{ type: 'codebarrel.action.log', value: 'flag' }] },
+      ],
+    },
+    builtInternally: {
+      description:
+        'NOT AN INPUT. The builder PRODUCES one of these per branch, with its own id, from each entry of `branches`.',
+      shape: { value: { conditionMatchType: 'ALL' }, conditions: 'the branch conditions', children: 'the branch actions' },
+    },
     verifiedMatchTypes: ['ALL', 'ANY'],
     notes:
       'ELSE is expressed as a trailing jira.condition.if.block sibling with an EMPTY `conditions` ' +

@@ -26,6 +26,8 @@ const TRIGGER_BUILDERS = {
       }
       return {
         eventFilters: [scope],
+        // Optional: "the field changed" already means any change, which is the
+        // only reading of a requester who names no particular kind of change.
         changeType: trigger.changeType || trigger.value?.changeType || 'ANY_CHANGE',
         fields: triggerFields.map((field) => ({
           value: normalizeTriggerFieldName(field),
@@ -55,6 +57,8 @@ const TRIGGER_BUILDERS = {
       const triggerValue = trigger.value || {};
       const fromStatus = trigger.fromStatus ?? triggerValue.fromStatus;
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
+      // Optional: an empty list means "any status" (the library documents it),
+      // and "when a ticket changes status" with no statuses named is a real request.
       return {
         eventFilters: [scope],
         fromStatus: Array.isArray(fromStatus) ? fromStatus : [],
@@ -90,6 +94,8 @@ const TRIGGER_BUILDERS = {
     schemaVersion: 1,
     buildValue(trigger, scope) {
       const triggerValue = trigger.value || {};
+      // Optional: -1999 means "any project", so a requester who names no source
+      // or target project is asking for exactly that.
       const projectFilter = (raw, label) => {
         const text = String(raw ?? '-1999').trim();
         if (text !== '-1999' && !/^\d+$/.test(text)) {
@@ -148,8 +154,8 @@ const TRIGGER_BUILDERS = {
     buildValue(trigger) {
       const triggerValue = trigger.value || {};
       const jql = nonEmptyString(trigger.jql ?? triggerValue.jql, 'trigger.jql');
-      // Default false matches the verified export: re-scan the whole result
-      // set each run rather than only issues touched since the last run.
+      // Optional: false (re-scan the whole result set each run) matches the
+      // verified export, and is what a requester means by "every issue that matches".
       const onlyUpdatedIssues =
         (trigger.onlyUpdatedIssues ?? triggerValue.onlyUpdatedIssues) === true;
       return {
@@ -503,8 +509,11 @@ function buildReceipt(payload) {
       });
     } else if (parsed && typeof parsed === 'object') {
       trigger = parsed.trigger?.type;
-      for (const c of Array.isArray(parsed.conditions) ? parsed.conditions : []) conditions.push(c?.type);
-      for (const a of Array.isArray(parsed.actions) ? parsed.actions : []) actions.push(a?.type);
+      const specParts = collectSpecParts(parsed);
+      for (const part of specParts) {
+        for (const c of Array.isArray(part?.conditions) ? part.conditions : []) conditions.push(c?.type);
+        for (const a of Array.isArray(part?.actions) ? part.actions : []) actions.push(a?.type);
+      }
     }
   } catch {
     // A malformed shape just yields a thinner summary; the digest still stands.
@@ -560,6 +569,40 @@ function readAutomationEnvironment() {
 }
 
 /**
+ * Words and phrases in a request that show it describes more than one case.
+ * Matched as whole words, ignoring upper and lower case. An entry that is an
+ * array is a pair that counts only when ALL of its words appear (so "if" alone
+ * does not, but "if ... else" does). This is a word search, not an
+ * understanding of the request: "escalate unless it is already assigned" is
+ * one case that contains "unless". That costs one extra question to the
+ * requester; the opposite mistake builds a rule that quietly does the wrong thing.
+ */
+export const BRANCH_WORDS = ['otherwise', 'unless', 'or else', 'in that case', 'depending on', ['if', 'else']];
+
+/** The BRANCH_WORDS found in `requestText`, each as the phrase to show (a pair reads "if ... else"). */
+export function findBranchWords(requestText) {
+  const hasWord = (phrase) =>
+    new RegExp(`\\b${phrase.trim().split(/\s+/).join('\\s+')}\\b`, 'i').test(requestText);
+  return BRANCH_WORDS
+    .filter((entry) => (Array.isArray(entry) ? entry.every(hasWord) : hasWord(entry)))
+    .map((entry) => (Array.isArray(entry) ? entry.join(' ... ') : entry));
+}
+
+/**
+ * How many cases a built rule has: the number of if-blocks anywhere in it
+ * (nested ones included, so a rule that splits twice inside one branch counts
+ * as having several cases), and at least 1, because a rule with no blocks still
+ * has its one unconditional case.
+ */
+export function countBranches(rule) {
+  let blocks = 0;
+  walkComponents(rule.components ?? [], (node) => {
+    if (node.type === 'jira.condition.if.block') blocks += 1;
+  });
+  return Math.max(1, blocks);
+}
+
+/**
  * First half: turn the agent's input into a validated Automation API rule
  * WITHOUT creating anything. The only network call is the optional
  * field-metadata GET (read-only).
@@ -603,6 +646,9 @@ export async function prepareRule(payload) {
   }
 
   let requestBody;
+  // The project's display name when the spec named it; null for a full payload
+  // or a bare projectId. Handed back so the approval ticket can show it.
+  let projectName = null;
   console.log(
     `[createJiraAutomationRule] parsed input as ${isFullRulePayload(parsed) ? 'a full rule payload' : 'a rule specification'}`
   );
@@ -621,11 +667,14 @@ export async function prepareRule(payload) {
       // internal fieldType class (see EDIT_OPERATION_VALUE_BUILDERS and
       // CONDITION_FIELD_VALUE_BUILDERS above). Only fetch it when actually
       // needed, so rules that use neither don't pay for an extra API call.
-      const needsFieldMetadata =
-        (Array.isArray(parsed.actions) &&
-          parsed.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
-        (Array.isArray(parsed.conditions) &&
-          parsed.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'));
+      // Branches (nested ones too) carry their own conditions and actions, so look in those too.
+      const specParts = collectSpecParts(parsed);
+      const needsFieldMetadata = specParts.some((part) =>
+        part && typeof part === 'object' &&
+        ((Array.isArray(part.actions) &&
+          part.actions.some((action) => action && action.type === 'jira.issue.edit')) ||
+        (Array.isArray(part.conditions) &&
+          part.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'))));
       console.log(`[createJiraAutomationRule] field metadata needed: ${needsFieldMetadata}`);
       const fieldMetadata = needsFieldMetadata
         ? await fetchJiraFieldMetadata(configuredCloudId, email, token)
@@ -636,10 +685,11 @@ export async function prepareRule(payload) {
 
       // The agent sends a project NAME; the numeric id is resolved here so
       // the agent never has to handle (or guess) a number.
-      const projectId = await resolveProjectId(parsed, configuredCloudId, email, token);
+      const project = await resolveProjectId(parsed, configuredCloudId, email, token);
+      projectName = project.name;
 
       requestBody = buildRulePayload(
-        { ...parsed, projectId },
+        { ...parsed, projectId: project.id },
         configuredCloudId,
         actorAccountId,
         fieldMetadata
@@ -656,7 +706,21 @@ export async function prepareRule(payload) {
   if (!allowlistCheck.ok) return failure(allowlistCheck.error);
 
   const { cloudId, rule, scope } = validation;
-  return { ok: true, rule, scope, cloudId };
+
+  // Only the built rule is counted, so a spec and a full payload are held to
+  // the same standard. requestText is not logged: it is free text from a person.
+  if (typeof payload?.requestText === 'string') {
+    const found = findBranchWords(payload.requestText);
+    if (found.length > 0 && countBranches(rule) < 2) {
+      return failure(
+        `The request describes more than one case (it contains ${found.map((word) => `"${word}"`).join(', ')}), ` +
+          'but the draft has only one branch. Do not put both outcomes in one branch: they would both ' +
+          'run every time instead of one or the other. Confirm with the requester what should happen in ' +
+          'each case, then send a branch for each in ruleSpec.branches.'
+      );
+    }
+  }
+  return { ok: true, rule, scope, cloudId, projectName };
 }
 
 /**
@@ -867,10 +931,11 @@ async function resolveProjectId(spec, cloudId, email, token) {
         'Neither projectName nor projectId was provided.'
     );
   }
-  if (!hasName) return spec.projectId;
+  // A bare projectId has no name to show; the ticket then shows the id alone.
+  if (!hasName) return { id: spec.projectId, name: null };
 
   const projectName = nonEmptyString(spec.projectName, 'projectName');
-  const resolvedId = await findProjectIdByName(projectName, cloudId, email, token);
+  const { id: resolvedId, name: resolvedName } = await findProjectByName(projectName, cloudId, email, token);
 
   if (hasId && String(spec.projectId).trim() !== resolvedId) {
     throw new Error(
@@ -878,16 +943,16 @@ async function resolveProjectId(spec, cloudId, email, token) {
         `projects (the name resolves to project id ${resolvedId}). Send only projectName.`
     );
   }
-  return resolvedId;
+  return { id: resolvedId, name: resolvedName };
 }
 
 /**
- * Look a project up by exact display name. The search endpoint's `query` is a
+ * Look a project up by exact display name, returning { id, name }. The search endpoint's `query` is a
  * SUBSTRING match on name and key, so its response is a candidate list: the
  * exact-name filter below is what makes this an answer. Zero or several exact
  * matches throw, naming real options so the agent can report them.
  */
-async function findProjectIdByName(projectName, cloudId, email, token) {
+async function findProjectByName(projectName, cloudId, email, token) {
   const auth = Buffer.from(`${email}:${token}`).toString('base64');
   const wanted = projectName.trim().toLowerCase();
   const candidates = [];
@@ -898,7 +963,7 @@ async function findProjectIdByName(projectName, cloudId, email, token) {
       `${JIRA_SITE_API_BASE}/${cloudId}/rest/api/3/project/search` +
       `?query=${encodeURIComponent(projectName)}` +
       `&startAt=${candidates.length}&maxResults=${PROJECT_SEARCH_PAGE_SIZE}`;
-    console.log(`[findProjectIdByName] GET ${url}`);
+    console.log(`[findProjectByName] GET ${url}`);
     let response;
     let body;
     try {
@@ -937,7 +1002,7 @@ async function findProjectIdByName(projectName, cloudId, email, token) {
       project && typeof project.name === 'string' && project.name.trim().toLowerCase() === wanted
   );
 
-  if (matches.length === 1) return String(matches[0].id);
+  if (matches.length === 1) return { id: String(matches[0].id), name: matches[0].name.trim() };
 
   if (matches.length === 0) {
     const names = candidates
@@ -1123,7 +1188,9 @@ function isSafeJiraNumericExpression(expression) {
 
 const RRULE_WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
 const RRULE_FREQUENCIES = ['DAILY', 'WEEKLY'];
-const DEFAULT_SCHEDULE_TIMEZONE = 'Asia/Singapore';
+
+// A value the agent did not send: absent, null or an empty string.
+const isMissing = (value) => value === undefined || value === null || value === '';
 
 /**
  * Build the iCal VEVENT string a jira.jql.scheduled trigger expects.
@@ -1153,16 +1220,35 @@ function buildScheduleRRule(schedule) {
 
   const config = schedule && typeof schedule === 'object' ? schedule : {};
 
+  // Optional: a WEEKLY schedule must name its days (checked below), so leaving
+  // frequency out cannot hide a missing answer; DAILY has to be asked for.
   const frequency = String(config.frequency || 'WEEKLY').toUpperCase();
   if (!RRULE_FREQUENCIES.includes(frequency)) {
     throw new Error(`trigger.schedule.frequency must be one of ${RRULE_FREQUENCIES.join(', ')}.`);
   }
 
-  const hour = scheduleInteger(config.hour, 'hour', 0, 23, 9);
-  const minute = scheduleInteger(config.minute, 'minute', 0, 59, 0);
+  // The time of day and the time zone decide WHEN the rule runs, so the
+  // requester must have chosen them. A made-up 09:00 Singapore time looks fine
+  // on the ticket and runs at the wrong hour for everyone else.
+  if (isMissing(config.hour) || isMissing(config.minute)) {
+    throw new Error(
+      'The requester did not say what time of day the rule should run. Ask them for the ' +
+        'time (for example 9:30), then send trigger.schedule.hour (0-23) and trigger.schedule.minute (0-59).'
+    );
+  }
+  if (isMissing(config.timezone)) {
+    throw new Error(
+      'The requester did not say which time zone the schedule is in. Ask them (for example ' +
+        '"Asia/Singapore") and send it as trigger.schedule.timezone; do not assume one.'
+    );
+  }
+  const hour = scheduleInteger(config.hour, 'hour', 0, 23);
+  const minute = scheduleInteger(config.minute, 'minute', 0, 59);
+  // Optional: 1 means "every week" (or every day), which is what a requester
+  // who names no gap between runs is asking for.
   const interval = scheduleInteger(config.interval, 'interval', 1, 52, 1);
 
-  const timezone = config.timezone || DEFAULT_SCHEDULE_TIMEZONE;
+  const timezone = config.timezone;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: timezone });
   } catch {
@@ -1171,7 +1257,13 @@ function buildScheduleRRule(schedule) {
 
   let days = [];
   if (frequency === 'WEEKLY') {
-    const requested = config.days ?? config.byDay ?? ['MO'];
+    const requested = config.days ?? config.byDay;
+    if (isMissing(requested)) {
+      throw new Error(
+        'The requester did not say which days of the week the rule should run. Ask them, then ' +
+          'send trigger.schedule.days (for example ["MO","TH"]).'
+      );
+    }
     days = (Array.isArray(requested) ? requested : [requested])
       .map((day) => String(day).trim().toUpperCase().slice(0, 2));
     if (days.length === 0) {
@@ -1211,7 +1303,7 @@ function pad2(value) {
 }
 
 function scheduleInteger(value, name, min, max, fallback) {
-  if (value === undefined || value === null || value === '') return fallback;
+  if (isMissing(value)) return fallback;
   const parsed = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
     throw new Error(`trigger.schedule.${name} must be an integer between ${min} and ${max}.`);
@@ -1220,7 +1312,9 @@ function scheduleInteger(value, name, min, max, fallback) {
 }
 
 function scheduleStartDate(startDate) {
-  if (startDate === undefined || startDate === null || startDate === '') {
+  // Optional: no start date means "from today", which is how Jira's own
+  // Automation UI behaves and what "starting now" means to a requester.
+  if (isMissing(startDate)) {
     const now = new Date();
     return (
       `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}`
@@ -1385,6 +1479,11 @@ function buildWebhookValue(rawValue) {
     });
   }
 
+  // Optional, all of them. url is the only value a web request cannot do
+  // without (required above). GET with an empty body is HTTP's own default for
+  // "call this address"; secure flags off and no extra headers are what a
+  // request that names none of them means; the two response flags are
+  // explained below.
   const built = {
     ...value,
     url,
@@ -1442,6 +1541,8 @@ function buildIssueFieldCondition(conditionSpec, fieldMetadata) {
   if (conditionSpec.value === undefined || conditionSpec.value === null || conditionSpec.value === '') {
     throw new Error(`conditions[].value.value is required for field "${fieldName}".`);
   }
+  // Optional: "the field is X" means EQUALS. Any other comparison has to be
+  // named, and one that is not verified for the field is refused below.
   const comparison = conditionSpec.comparison || 'EQUALS';
   // Checked once the field is known, because verified comparisons differ per field.
   const assertComparison = (verified) => {
@@ -1546,7 +1647,8 @@ function normalizeFullPayload(parsed, actorAccountId) {
   }
   // A rule with no actor is rejected with a generic parse error. A pasted
   // payload usually carries one already; supply the configured account when
-  // it does not.
+  // it does not. This comes from the Forge environment, not from the requester,
+  // so it is not a value anyone could have been asked for.
   if (!rule.actor) {
     rule.actor = { type: 'ACCOUNT_ID', actor: actorAccountId };
   }
@@ -1604,172 +1706,64 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
   // the id written into a child's parentId is the same string that ends up on
   // the parent object itself.
   const triggerId = randomUUID();
-  const conditionBlockId = randomUUID();
-  const conditionContainerId = randomUUID();
-  const conditions = (spec.conditions || []).map((condition) => {
-    if (!condition || !ALLOWED_CONDITION_TYPES.includes(condition.type)) {
-      const received = condition?.type
-        ? `"${condition.type}"`
-        : condition
-          ? 'a condition with no "type"'
-          : 'a null/undefined condition';
-      throw new Error(
-        `conditions[] received ${received}, which is not a verified condition type. ` +
-          `Allowed: ${ALLOWED_CONDITION_TYPES.join(', ')}.`
-      );
-    }
-    // Use the type the caller actually asked for. Forcing every condition to
-    // be a comparator produced a comparator component holding an issue
-    // condition's value, which the API cannot parse.
-    let value = condition.value;
-    if (condition.type === 'jira.issue.condition') {
-      // Same problem as jira.issue.edit: the internal shape (field-by-NAME
-      // plus a selectedFieldType) is not something a prompt or an LLM can
-      // reliably invent, so it's built here from real tenant field metadata.
-      if (!fieldMetadata) {
-        throw new Error('Field metadata was not loaded for a jira.issue.condition.');
-      }
-      value = buildIssueFieldCondition(condition.value, fieldMetadata);
-    }
-    assertVerifiedComponentValue('condition', condition.type, value);
-    return component('CONDITION', condition.type, value, {
-      conditionParentId: conditionBlockId,
-      schemaVersion:
-        condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] ||
-        CONDITION_LIBRARY[condition.type]?.schemaVersion || 1,
-    });
-  });
+  const context = { projectId, fieldMetadata };
 
-  const hasConditions = conditions.length > 0;
-
-  const actions = (spec.actions || []).map((action) => {
-    if (!action || !ALLOWED_ACTION_TYPES.includes(action.type)) {
-      // Name what was rejected, not just what is allowed. Without the offending
-      // type the caller cannot tell which of a dozen actions was wrong, and
-      // neither can anyone reading the logs afterwards.
-      const received = action?.type
-        ? `"${action.type}"`
-        : action
-          ? 'an action with no "type"'
-          : 'a null/undefined action';
-      throw new Error(
-        `actions[] received ${received}, which is not a verified action type. ` +
-          `Allowed: ${ALLOWED_ACTION_TYPES.join(', ')}.`
-      );
-    }
-
-    let value = action.value ?? {};
-    if (action.type === 'jira.issue.outgoing.webhook') {
-      value = buildWebhookValue(value);
-    }
-    if (action.type === 'jira.issue.edit') {
-      // The internal `operations` shape - field-by-NAME plus a fieldType
-      // class Jira's UI needs to populate "Choose fields to set..." - is not
-      // something a prompt or an LLM can reliably invent, so it is built
-      // here from real tenant field metadata instead of trusting it
-      // directly. Standard select/text fields become operations; Jira float
-      // fields use the numeric advancedFields JSON format from the rule sample.
-      //
-      // `fields` lives inside `value`, same as every other action type here
-      // (log's value.text, comment's value.comment, etc.) - keeping this
-      // action consistent with that convention means the agent does not
-      // have to special-case it.
-      const editFields = normalizeEditFields(value.fields);
-      if (!editFields || editFields.length === 0) {
-        throw new Error(
-          'jira.issue.edit takes "value.fields" and builds the Jira payload itself - do not ' +
-            'supply "operations" or "advancedFields" directly. Use an array of ' +
-            '{ name or fieldId, value } entries, or an object mapping field names/IDs to values, ' +
-            'e.g. { "fields": { "customfield_11594": "{{#=}}ROUND({{issue.customfield_11594|0}} ' +
-            '+ 1, 2){{/}}" } }. Numeric fields are routed to advancedFields automatically.'
-        );
-      }
-      if (!fieldMetadata) {
-        throw new Error('Field metadata was not loaded for a jira.issue.edit action.');
-      }
-      const operations = [];
-      const numericFields = [];
-      for (const fieldSpec of editFields) {
-        const fieldName = editFieldName(fieldSpec);
-        const jiraField = findJiraField(fieldName, fieldMetadata);
-        if (jiraField.schema?.custom === FLOAT_CUSTOM_FIELD_TYPE) {
-          const fieldId = jiraField.key || jiraField.id;
-          if (typeof fieldId !== 'string' || fieldId.trim() === '') {
-            throw new Error(`Numeric field "${fieldName}" has no Jira field ID.`);
-          }
-          numericFields.push({
-            fieldId,
-            value: buildAdvancedNumericValue(fieldSpec.value, fieldName),
-          });
-        } else {
-          operations.push(buildEditOperation(fieldSpec, fieldMetadata, jiraField));
-        }
-      }
-      value = {
-        operations,
-        advancedFields: numericFields.length > 0
-          ? buildAdvancedNumericFields(numericFields)
-          : null,
-        // Matches the confirmed working rule's value. Explicit `false` in the
-        // spec opts out; anything else (including omitted) keeps this default.
-        sendNotifications: value.sendNotifications !== false,
-      };
-    }
-
-    if (action.type === 'jira.proforma.form.add.action') {
-      // The form is attached from the rule's OWN project's templates, whatever
-      // the spec says, so a draft cannot reach into another project's forms.
-      value = {
-        ...value,
-        templateFormsConfig: { ...(value.templateFormsConfig || {}), projectId: Number(projectId) },
-      };
-    }
-
-    assertVerifiedComponentValue('action', action.type, value);
-
-    // With no conditions there is no if-block to hang actions off, so they sit
-    // at the top of `components` with a null parent. Both shapes are accepted
-    // by the API; this one matches what the Automation UI produces for a rule
-    // that has no conditions.
-    return component('ACTION', action.type, value, {
-      parentId: hasConditions ? conditionBlockId : null,
-      schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] ||
-        ACTION_LIBRARY[action.type]?.schemaVersion || 1,
-    });
-  });
-
-  if (!hasConditions && actions.length === 0) {
-    throw new Error('Provide at least one condition or action.');
+  // Optional checks on the trigger itself: they gate the WHOLE rule, setup
+  // actions included, which a condition inside a branch cannot do. The export
+  // (SDP-Jira.txt) hangs them on the trigger with conditionParentId = the
+  // trigger id and parentId null, and the trigger carries no match type, so
+  // every check must pass. buildCondition produces exactly that wiring.
+  if (trigger.conditions !== undefined && !Array.isArray(trigger.conditions)) {
+    throw new Error('trigger.conditions must be an array.');
   }
+  const triggerConditions = (trigger.conditions ?? []).map((condition) =>
+    buildCondition(condition, triggerId, fieldMetadata));
 
-  const conditionMatchType = spec.conditionMatchType || 'ALL';
-  if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
-    throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
-  }
-
+  // `branches` is the general form: one if.block per entry. The flat
+  // conditions + actions input is just a single branch, so both go through the
+  // same block-building code.
   let components;
-  if (hasConditions) {
-    const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
-      conditionMatchType,
-    }, { id: conditionBlockId, parentId: conditionContainerId });
-    conditionBlock.conditions = conditions;
-    conditionBlock.children = actions;
-
-    const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
-      id: conditionContainerId,
-    });
-    conditionContainer.children = [conditionBlock];
-
-    components = [conditionContainer];
+  if (spec.branches !== undefined) {
+    // Two ways of writing the same thing: silently preferring one would drop
+    // half of the caller's logic, so refuse.
+    if (spec.conditions !== undefined && spec.conditions !== null) {
+      throw new Error(
+        'ruleSpec has both "branches" and top-level "conditions". Put each condition inside the ' +
+          'branch it belongs to.'
+      );
+    }
+    // Top-level actions next to branches are setup actions: they run
+    // unconditionally, before the branching, so they come first with no parent
+    // and the container goes last. Optional: most rules have none.
+    const setupActions = spec.actions ?? [];
+    if (!Array.isArray(setupActions)) {
+      throw new Error('actions must be an array.');
+    }
+    components = [
+      ...setupActions.map((action) => buildAction(action, null, fieldMetadata, projectId)),
+      buildBranchContainer(spec.branches, null, context),
+    ];
   } else {
-    components = actions;
+    // Optional: a rule with no conditions at all is legitimate ("on every new
+    // issue, do X"). Absent actions are left as they were: at least one
+    // condition or action is required below, and existing callers build
+    // condition-only rules.
+    const [block] = buildBranchBlocks([{
+      conditions: spec.conditions || [],
+      actions: spec.actions || [],
+      conditionMatchType: spec.conditionMatchType,
+    }], false, context);
+    components = block.hasConditions ? [assembleBranchContainer([block], null)] : block.actions;
   }
 
   return {
     rule: {
       name,
       state: 'DISABLED',
+      // Optional: a free-text note for people reading the rule list.
       description: typeof spec.description === 'string' ? spec.description : '',
+      // The next four are fixed rule settings copied from the verified exports,
+      // not values taken from the request, so there is nothing to ask for.
       canOtherRuleTrigger: true,
       notifyOnError: 'FIRSTERROR',
       // Required by the API. Without an actor the create request fails with a
@@ -1782,16 +1776,297 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
         type: trigger.type,
         value: triggerBuilder.buildValue(trigger, scope),
         connectionId: null,
-        conditions: [],
+        conditions: triggerConditions,
         id: triggerId,
       },
       components,
       ruleScopeARIs: [scope],
+      // Optional: labels are only for finding the rule later.
       labels: Array.isArray(spec.labels) ? spec.labels : [],
       writeAccessType: 'UNRESTRICTED',
       collaborators: [],
     },
   };
+}
+
+/**
+ * Every spec part that can carry conditions or actions: the spec itself, each
+ * branch, and each branch nested inside a branch, to any depth. Used by the
+ * field-metadata scan and the receipt summary so nested branches are seen too.
+ */
+function collectSpecParts(spec) {
+  const parts = [spec];
+  // The trigger's own conditions are scanned like any other block's.
+  if (Array.isArray(spec?.trigger?.conditions)) parts.push({ conditions: spec.trigger.conditions });
+  if (spec && typeof spec === 'object' && Array.isArray(spec.branches)) {
+    for (const branch of spec.branches) parts.push(...collectSpecParts(branch));
+  }
+  return parts;
+}
+
+/**
+ * Build ONE jira.condition.container.block holding one if.block per entry in
+ * `branches` (validated here). `parentId` is the id of the component the
+ * container hangs under: null at the top level of a rule, or the id of an
+ * enclosing if.block when a container is nested inside a branch.
+ * `context` is { projectId, fieldMetadata }, passed through to the builders.
+ * `path` names this list in error messages ("branches", then
+ * "branches[0].branches" one level down) so the agent can find the bad entry.
+ */
+function buildBranchContainer(branches, parentId, context, path = 'branches') {
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw new Error(`${path} must be a non-empty array.`);
+  }
+  const branchSpecs = branches.map((branch, index) => {
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch)) {
+      throw new Error(`${path}[${index}] must be an object.`);
+    }
+    // An omitted "conditions" would silently turn this branch into the else.
+    // The else must be asked for with an explicit empty list.
+    if (branch.conditions === undefined) {
+      throw new Error(
+        `${path}[${index}] has no "conditions". Send the conditions for this case, or an empty ` +
+          'list "conditions": [] if it is the else, the case that applies when no other case does.'
+      );
+    }
+    const branchConditions = branch.conditions;
+    // Optional: a branch that only splits further has no actions of its own
+    // (checked below that it then has nested branches).
+    const branchActions = branch.actions ?? [];
+    if (!Array.isArray(branchConditions) || !Array.isArray(branchActions)) {
+      throw new Error(`${path}[${index}] conditions and actions must be arrays.`);
+    }
+    // An empty-conditions block is the else: it always matches. Anything
+    // after it can never run, so only the last branch may be one. This also
+    // means there can be at most one else.
+    if (branchConditions.length === 0 && index < branches.length - 1) {
+      throw new Error(
+        `${path}[${index}] has no conditions, so it is the else and always matches. ` +
+          'Every later branch would be unreachable; only the last branch may have empty conditions.'
+      );
+    }
+    // A branch that only splits further (no actions of its own, just nested
+    // branches) is meaningful, so nested branches count as something to do.
+    if (branchActions.length === 0 && branch.branches === undefined) {
+      throw new Error(`${path}[${index}] has no actions or branches; a branch must do something.`);
+    }
+    return {
+      conditions: branchConditions,
+      actions: branchActions,
+      conditionMatchType: branch.conditionMatchType,
+      branches: branch.branches,
+      path: `${path}[${index}]`,
+    };
+  });
+  return assembleBranchContainer(buildBranchBlocks(branchSpecs, true, context), parentId);
+}
+
+/**
+ * Turn validated branch specs into built conditions and actions, each branch
+ * with its own block id. `actionsUnderBlock` is false only for the flat input
+ * with no conditions, where there is no if-block to hang actions off.
+ */
+function buildBranchBlocks(branchSpecs, actionsUnderBlock, { projectId, fieldMetadata }) {
+  return branchSpecs.map((branchSpec) => {
+    // Each branch owns its block id. Its conditions point at it through
+    // conditionParentId and its actions through parentId; sharing one id
+    // between branches would make Jira treat them all as one branch.
+    const blockId = randomUUID();
+    const conditions = branchSpec.conditions.map((condition) =>
+      buildCondition(condition, blockId, fieldMetadata));
+    const hasConditions = conditions.length > 0;
+    // With no conditions in the flat form there is no if-block to hang actions
+    // off, so they sit at the top of `components` with a null parent. Both
+    // shapes are accepted by the API; this one matches what the Automation UI
+    // produces for a rule that has no conditions. A branch is always a block.
+    const actions = branchSpec.actions.map((action) =>
+      buildAction(action, hasConditions || actionsUnderBlock ? blockId : null, fieldMetadata, projectId));
+
+    // A branch's own actions run first; the nested container follows them as
+    // the block's last child, hung under this block's id (as in a real export).
+    if (branchSpec.branches !== undefined) {
+      actions.push(buildBranchContainer(
+        branchSpec.branches, blockId, { projectId, fieldMetadata }, `${branchSpec.path}.branches`));
+    }
+
+    if (!hasConditions && actions.length === 0) {
+      throw new Error('Provide at least one condition or action.');
+    }
+
+    // With two or more conditions, ALL ("every one") and ANY ("at least one")
+    // build different rules, so the requester must have chosen. With one
+    // condition or none the two are the same, so ALL is just a placeholder.
+    if (!branchSpec.conditionMatchType && conditions.length > 1) {
+      throw new Error(
+        'This case has more than one condition, but the requester did not say whether ALL of them ' +
+          'must be true or just ANY one. Ask them, then send conditionMatchType "ALL" or "ANY".'
+      );
+    }
+    const conditionMatchType = branchSpec.conditionMatchType || 'ALL';
+    if (!ALLOWED_MATCH_TYPES.includes(conditionMatchType)) {
+      throw new Error(`conditionMatchType must be one of ${ALLOWED_MATCH_TYPES.join(', ')}.`);
+    }
+    return { blockId, conditions, actions, hasConditions, conditionMatchType };
+  });
+}
+
+/** Wrap built branch blocks in one container component with the given parent. */
+function assembleBranchContainer(branchBlocks, parentId) {
+  const containerId = randomUUID();
+  const conditionBlocks = branchBlocks.map((branch) => {
+    const conditionBlock = component('CONDITION_BLOCK', 'jira.condition.if.block', {
+      conditionMatchType: branch.conditionMatchType,
+    }, { id: branch.blockId, parentId: containerId });
+    conditionBlock.conditions = branch.conditions;
+    conditionBlock.children = branch.actions;
+    return conditionBlock;
+  });
+
+  const conditionContainer = component('CONDITION', 'jira.condition.container.block', {}, {
+    id: containerId,
+    parentId,
+  });
+  conditionContainer.children = conditionBlocks;
+  return conditionContainer;
+}
+
+/**
+ * Build one condition component for the if-block whose id is `blockId`.
+ * `fieldMetadata` is only consulted for jira.issue.condition.
+ */
+function buildCondition(condition, blockId, fieldMetadata) {
+  if (!condition || !ALLOWED_CONDITION_TYPES.includes(condition.type)) {
+    const received = condition?.type
+      ? `"${condition.type}"`
+      : condition
+        ? 'a condition with no "type"'
+        : 'a null/undefined condition';
+    throw new Error(
+      `conditions[] received ${received}, which is not a verified condition type. ` +
+        `Allowed: ${ALLOWED_CONDITION_TYPES.join(', ')}.`
+    );
+  }
+  // Use the type the caller actually asked for. Forcing every condition to
+  // be a comparator produced a comparator component holding an issue
+  // condition's value, which the API cannot parse.
+  let value = condition.value;
+  if (condition.type === 'jira.issue.condition') {
+    // Same problem as jira.issue.edit: the internal shape (field-by-NAME
+    // plus a selectedFieldType) is not something a prompt or an LLM can
+    // reliably invent, so it's built here from real tenant field metadata.
+    if (!fieldMetadata) {
+      throw new Error('Field metadata was not loaded for a jira.issue.condition.');
+    }
+    value = buildIssueFieldCondition(condition.value, fieldMetadata);
+  }
+  assertVerifiedComponentValue('condition', condition.type, value);
+  return component('CONDITION', condition.type, value, {
+    conditionParentId: blockId,
+    schemaVersion:
+      condition.schemaVersion || CONDITION_SCHEMA_VERSIONS[condition.type] ||
+      CONDITION_LIBRARY[condition.type]?.schemaVersion || 1,
+  });
+}
+
+/**
+ * Build one action component whose parent is `parentId` (an if-block id, or
+ * null for a top-level action). `fieldMetadata` is only consulted for
+ * jira.issue.edit; `projectId` pins form actions to the rule's own project.
+ */
+function buildAction(action, parentId, fieldMetadata, projectId) {
+  if (!action || !ALLOWED_ACTION_TYPES.includes(action.type)) {
+    // Name what was rejected, not just what is allowed. Without the offending
+    // type the caller cannot tell which of a dozen actions was wrong, and
+    // neither can anyone reading the logs afterwards.
+    const received = action?.type
+      ? `"${action.type}"`
+      : action
+        ? 'an action with no "type"'
+        : 'a null/undefined action';
+    throw new Error(
+      `actions[] received ${received}, which is not a verified action type. ` +
+        `Allowed: ${ALLOWED_ACTION_TYPES.join(', ')}.`
+    );
+  }
+
+  // Not a silent default: an action that needs a value but got none fails the
+  // checks below by naming the missing key (assertVerifiedComponentValue, or
+  // the webhook url and edit fields checks), so {} never reaches the API.
+  let value = action.value ?? {};
+  if (action.type === 'jira.issue.outgoing.webhook') {
+    value = buildWebhookValue(value);
+  }
+  if (action.type === 'jira.issue.edit') {
+    // The internal `operations` shape - field-by-NAME plus a fieldType
+    // class Jira's UI needs to populate "Choose fields to set..." - is not
+    // something a prompt or an LLM can reliably invent, so it is built
+    // here from real tenant field metadata instead of trusting it
+    // directly. Standard select/text fields become operations; Jira float
+    // fields use the numeric advancedFields JSON format from the rule sample.
+    //
+    // `fields` lives inside `value`, same as every other action type here
+    // (log's value.text, comment's value.comment, etc.) - keeping this
+    // action consistent with that convention means the agent does not
+    // have to special-case it.
+    const editFields = normalizeEditFields(value.fields);
+    if (!editFields || editFields.length === 0) {
+      throw new Error(
+        'jira.issue.edit takes "value.fields" and builds the Jira payload itself - do not ' +
+          'supply "operations" or "advancedFields" directly. Use an array of ' +
+          '{ name or fieldId, value } entries, or an object mapping field names/IDs to values, ' +
+          'e.g. { "fields": { "customfield_11594": "{{#=}}ROUND({{issue.customfield_11594|0}} ' +
+          '+ 1, 2){{/}}" } }. Numeric fields are routed to advancedFields automatically.'
+      );
+    }
+    if (!fieldMetadata) {
+      throw new Error('Field metadata was not loaded for a jira.issue.edit action.');
+    }
+    const operations = [];
+    const numericFields = [];
+    for (const fieldSpec of editFields) {
+      const fieldName = editFieldName(fieldSpec);
+      const jiraField = findJiraField(fieldName, fieldMetadata);
+      if (jiraField.schema?.custom === FLOAT_CUSTOM_FIELD_TYPE) {
+        const fieldId = jiraField.key || jiraField.id;
+        if (typeof fieldId !== 'string' || fieldId.trim() === '') {
+          throw new Error(`Numeric field "${fieldName}" has no Jira field ID.`);
+        }
+        numericFields.push({
+          fieldId,
+          value: buildAdvancedNumericValue(fieldSpec.value, fieldName),
+        });
+      } else {
+        operations.push(buildEditOperation(fieldSpec, fieldMetadata, jiraField));
+      }
+    }
+    value = {
+      operations,
+      advancedFields: numericFields.length > 0
+        ? buildAdvancedNumericFields(numericFields)
+        : null,
+      // Optional. Matches the confirmed working rule's value, and is what Jira's
+      // own edit action does: people watching the issue are told of the change.
+      // Explicit `false` in the spec opts out; anything else (including omitted) keeps this default.
+      sendNotifications: value.sendNotifications !== false,
+    };
+  }
+
+  if (action.type === 'jira.proforma.form.add.action') {
+    // The form is attached from the rule's OWN project's templates, whatever
+    // the spec says, so a draft cannot reach into another project's forms.
+    value = {
+      ...value,
+      templateFormsConfig: { ...(value.templateFormsConfig || {}), projectId: Number(projectId) },
+    };
+  }
+
+  assertVerifiedComponentValue('action', action.type, value);
+
+  return component('ACTION', action.type, value, {
+    parentId,
+    schemaVersion: action.schemaVersion || ACTION_SCHEMA_VERSIONS[action.type] ||
+      ACTION_LIBRARY[action.type]?.schemaVersion || 1,
+  });
 }
 
 // `id` is pulled out of `extra` first so a caller can supply one. Previously
@@ -2056,6 +2331,13 @@ function verifyCreatedRule(retrieved, expectedScope, expectedRule) {
 
   if (!componentsContainExpectedValues(actualRule.components, expectedRule.components)) {
     return { ok: false, error: 'Retrieved conditions or actions did not match the request.' };
+  }
+
+  // A dropped trigger condition would remove the gate in front of the whole
+  // rule, so compare those too (only when some were requested).
+  if (expectedRule.trigger?.conditions?.length > 0 &&
+      !componentsContainExpectedValues(actualRule.trigger?.conditions, expectedRule.trigger.conditions)) {
+    return { ok: false, error: 'Retrieved trigger conditions did not match the request.' };
   }
 
   return { ok: true };

@@ -24,9 +24,35 @@ Drafting a new rule:
    guess a project: the app looks the name up. If the draft fails because
    the project was not found or is ambiguous, relay the listed options to
    the requester and ask which one they mean.
-3. Call draft-automation-rule with ruleSpec and a one or two sentence
-   requestSummary of what the user asked for. Do not pick an approver:
-   any member of the approver group reviews the ticket.
+   A request with different outcomes for different cases is ONE rule with
+   several branches (a "branches" array; the last branch with empty
+   conditions is the else). Ask what happens in each case, not how many
+   rules to build. Steps that always happen go in top-level "actions"
+   next to "branches" and run first; a branch can hold its own "branches".
+   A request where some steps always happen and later steps depend on a
+   result is still ONE rule (setup actions plus branches), never several
+   rules and never one flattened block. Never put
+   jira.condition.container.block in "actions". A check that must hold for
+   the whole rule, setup actions included (for example "only when this
+   field is Yes"), goes in "trigger.conditions", not in a branch. The workedExample on
+   jira.condition.container.block in get-component-reference shows the shape.
+3. Call draft-automation-rule with ruleSpec, requestText and a one or two
+   sentence requestSummary of what the user asked for. requestText is the
+   requester's message copied word for word, never your summary or your
+   rewording: the approving manager reads it next to the draft. The call is
+   refused without it. Do not pick an approver: any member of the approver
+   group reviews the ticket.
+   The app refuses a draft when requestText contains a word that shows more
+   than one case ("otherwise", "unless", "or else", "in that case",
+   "depending on", or "if" together with "else") and the draft has only one
+   branch. When that happens, ask the requester what should happen in each
+   case, then send a branch for each. Never flatten the cases into one
+   branch, never reword requestText to avoid the word, and never drop the
+   words from it.
+   The app also refuses, in the requester's words, a value the requester must
+   choose (for example the time zone or time of day of a schedule, or whether
+   ALL or ANY of several conditions must match). Ask the requester for it and
+   send it. Never fill it in yourself.
 4. Relay the returned `message` (or `summary` on failure) to the user
    word for word. A draft is not a rule: never say a rule was created,
    enabled or is live. Point the user to the approval ticket key instead.
@@ -45,7 +71,9 @@ approval ticket key and the manager's comments):
 1. Read the manager's comments and the latest "Draft vN" comment on the ticket.
 2. Produce a COMPLETE corrected ruleSpec (not a diff) that addresses every
    comment, again using only shapes from get-component-reference.
-3. Call revise-automation-rule-draft with issueKey and the ruleSpec.
+3. Call revise-automation-rule-draft with issueKey and the ruleSpec. Do not
+   send requestText: the app keeps the original and checks the revision
+   against it, so a revision that merges the cases into one branch is refused.
 4. If a comment asks for something unsupported, still submit the best valid
    draft and say plainly which request could not be met.
 

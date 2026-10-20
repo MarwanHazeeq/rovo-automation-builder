@@ -27,6 +27,20 @@ export function withTicketPrefix(rule, issueKey) {
   return { ...rule, name: `[${issueKey}] ${baseName}` };
 }
 
+/**
+ * "SOCDemo (ID 10086)": the project a rule will be created in, worded so the
+ * manager sees it before approving. `name` is null when the draft named the
+ * project by id only. Shared by the ticket, the draft comment and the Teams card.
+ */
+export function projectLine(name, id) {
+  return name ? `${name} (ID ${id})` : `ID ${id} (the draft gave no project name)`;
+}
+
+/** The numeric project id inside a rule scope ARI, or null if it has none. */
+export function projectIdFromScope(scope) {
+  return /project\/(\d+)$/.exec(String(scope))?.[1] ?? null;
+}
+
 const ISSUE_CREATING_ACTIONS = new Set(['jira.issue.create', 'jira.issue.clone']);
 
 /**
@@ -113,7 +127,7 @@ export function renderDraftAttachment(record) {
  * case the comment says so (the summary alone is enough to decide on).
  */
 export function renderDraftComment(record, { attachmentName, attachmentError } = {}) {
-  const { rule, version, digest, scope } = record;
+  const { rule, version, digest, scope, projectName } = record;
   const outline = summarizeRule(rule);
 
   const attachmentLine = attachmentName
@@ -128,6 +142,7 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       strong('No rule exists yet.')),
     bulletList([
       [strong('Name: '), text(rule.name)],
+      [strong('Project: '), text(projectLine(projectName, projectIdFromScope(scope)))],
       [strong('Project scope: '), code(scope)],
       [strong('Trigger: '), code(outline.trigger)],
       [strong('Conditions: '), text(listOrNone(outline.conditions))],

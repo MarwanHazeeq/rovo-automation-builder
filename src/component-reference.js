@@ -28,10 +28,18 @@ const USAGE_NOTES = [
     'described here. Do not refuse to use a smart value because it is absent from this reference.',
   'An entry marked verified: false has no confirmed export on this tenant. Do not build with it; ' +
     'say it is unverified and stop.',
-  'A rule supports ONE condition branch. if / else-if cannot be expressed; that needs several rules.',
+  'A rule supports several condition branches through `branches`; the last branch with empty ' +
+    'conditions is the else. Different outcomes for different cases are ONE rule, not several. ' +
+    'Steps that always run before the branches go in top-level `actions` next to `branches`; a ' +
+    'branch can hold nested `branches`. Setup then branching is still ONE rule: see workedExample ' +
+    'on jira.condition.container.block.',
+  'A check that must hold for the WHOLE rule, setup actions included, goes in `trigger.conditions` ' +
+    '(an array of ordinary conditions, next to the trigger `type`), not in a branch. Every one must ' +
+    'pass; there is no ALL/ANY choice there, so do not send conditionMatchType for them.',
   'There is no iteration component. Per issue, use the jira.jql.scheduled trigger. Per list item, ' +
     'use {{#list}}...{{/}} inside a jira.create.variable step.',
-  'Read a web-request response as {{webhookResponse.*}}, never {{webResponse.*}}. A second request ' +
+  'Read a web-request response as {{webhookResponse.*}} or {{webResponse.*}}; when a spec names one, ' +
+    'keep it exactly as written. A second request ' +
     'in the same rule overwrites it.',
 ];
 
@@ -60,6 +68,7 @@ function detail(kind, type, entry) {
   };
   for (const key of [
     'example',
+    'workedExample',
     'builtInternally',
     'verifiedOperators',
     'verifiedMatchTypes',
