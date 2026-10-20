@@ -25,10 +25,17 @@ rule is created disabled.
 | --- | --- |
 | `<SDP_CLIENT_ID>` | query of the `ClientID` variable |
 | `<SDP_CLIENT_SECRET>` | query of the `ClientSecret` variable |
-| `<TOKEN_HOST>` | host in the token request URL |
-| `<SDP_HOST>` | host in the SDP request URL |
-| `<SYNC_SERVICE_URL>` | the whole sync-service URL (host, path and signature) |
 | `<SYNC_AUTH_KEY>` | value of the `Auth-Key` header on the sync-service call |
+
+A web-request URL is NOT one of these placeholders, and must never be written
+as one. Jira validates every web request's URL when the rule is created, even
+though the rule is created disabled, and rejects the whole rule with
+"Please enter a valid web request URL" if any of them is not a real URL.
+So the token and SDP hosts below are the real ones (public vendor hostnames,
+not secrets), and the sync-service URL — which does carry a signature — is a
+syntactically valid stand-in on the reserved `.invalid` domain, which a human
+replaces before enabling. It parses as a URL and can never resolve to
+anything real.
 
 ### Trigger
 
@@ -44,7 +51,7 @@ they guard the setup steps; do not move the setup steps inside a branch.
 
 1. Variable `ClientID` = `<SDP_CLIENT_ID>`.
 2. Variable `ClientSecret` = `<SDP_CLIENT_SECRET>`.
-3. Token request: POST `https://<TOKEN_HOST>/oauth/v2/token`, header
+3. Token request: POST `https://accounts.zoho.com.cn/oauth/v2/token`, header
    `Content-Type: application/x-www-form-urlencoded`, custom body
    `client_id={{ClientID}}&client_secret={{ClientSecret}}&grant_type=client_credentials&scope=SDPOnDemand.requests.ALL`.
 4. Variable `AuthToken` = `Bearer {{webResponse.body.access_token}}`.
@@ -59,7 +66,7 @@ they guard the setup steps; do not move the setup steps inside a branch.
 10. Variable `sdppayload` = a JSON object
     `{"request":{"subject":"{{issue.summary.jsonEncode}}","description":"{{issue.description.jsonEncode}}","udf_fields":{"udf_char31":"{{issue.key}}"}}}`.
 11. Audit log write: `{{sdppayload}}`.
-12. SDP request: POST `https://<SDP_HOST>/api/v3/requests`, headers
+12. SDP request: POST `https://servicedeskplus.cn/api/v3/requests`, headers
     `Content-Type: application/x-www-form-urlencoded` and
     `Accept: application/vnd.manageengine.sdp.v3+json`, custom body
     `input_data={{sdppayload.urlEncode}}`, with authentication switched on
@@ -88,7 +95,7 @@ and is checked after the accepted one.
    - `{{comment.attachments.size}}` greater than 0
 
    Its actions:
-   1. Sync-service request: POST `<SYNC_SERVICE_URL>`, headers
+   1. Sync-service request: POST `https://replace-before-enabling.invalid/sync`, headers
       `Content-Type: application/json` and `Auth-Key: <SYNC_AUTH_KEY>`
       (secret header), custom body
       `{"jiraTicketKey":"{{issue.key}}","SDPToken":"{{AuthToken}}","SDPRequestID":"{{webhookResponse.body.request.id}}"}`.
