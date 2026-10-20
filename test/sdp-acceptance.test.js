@@ -6,9 +6,10 @@ import { buildRulePayload, createJiraAutomationRule } from '../src/index.js';
 // docs/specs/sdp-request-creation.md. Every secret is a placeholder string
 // that must survive into the payload untouched.
 
-const TRIGGER = { type: 'jira.issue.field.changed', fields: ['Send to Customer ITSM'] };
+const SELECT = 'com.atlassian.jira.plugin.system.customfieldtypes:select';
 const TEXTFIELD = 'com.atlassian.jira.plugin.system.customfieldtypes:textfield';
 const FIELDS = [
+  { id: 'customfield_10126', key: 'customfield_10126', name: 'Send to Customer ITSM', schema: { type: 'option', custom: SELECT } },
   { id: 'customfield_10300', key: 'customfield_10300', name: 'Customer ITSM Incident', schema: { type: 'string', custom: TEXTFIELD } },
 ];
 
@@ -27,6 +28,17 @@ const comment = (text) => ({
   type: 'jira.issue.comment',
   value: { comment: text, publicComment: false, commentVisibility: null, sendNotifications: true, addCommentOnce: true },
 });
+
+// The two gate checks sit on the trigger itself so they guard the setup actions
+// too: forwarding flag is Yes, and no request id is recorded yet.
+const TRIGGER = {
+  type: 'jira.issue.field.changed',
+  fields: ['Send to Customer ITSM'],
+  conditions: [
+    compare('{{issue.customfield_10300}}', 'EQUALS', ''),
+    { type: 'jira.issue.condition', value: { name: 'Send to Customer ITSM', value: 'Yes', comparison: 'EQUALS' } },
+  ],
+};
 
 const SPEC = {
   name: 'SDP request creation',
@@ -124,6 +136,22 @@ test('the SDP spec builds through buildRulePayload and is DISABLED', () => {
   assert.equal(build().rule.state, 'DISABLED');
 });
 
+test('the trigger carries both gate checks, wired to the trigger id', () => {
+  const { trigger } = build().rule;
+  assert.deepEqual(trigger.conditions.map((c) => c.type), ['jira.comparator.condition', 'jira.issue.condition']);
+  for (const c of trigger.conditions) {
+    assert.equal(c.conditionParentId, trigger.id);
+    assert.equal(c.parentId, null);
+  }
+  assert.equal(trigger.conditions[1].value.compareValue.value, 'Yes');
+});
+
+test('a spec without trigger.conditions still builds trigger.conditions as []', () => {
+  const { trigger: _drop, ...rest } = SPEC;
+  const { rule } = buildRulePayload({ ...rest, trigger: { ...TRIGGER, conditions: undefined } }, 'test-cloud', 'test-actor', FIELDS);
+  assert.deepEqual(rule.trigger.conditions, []);
+});
+
 test('thirteen setup actions sit at the top level before the one container, which is last', () => {
   const { components } = build().rule;
   assert.equal(components.length, 14);
@@ -196,7 +224,8 @@ function reassignIds(node) {
   return node;
 }
 
-test('the SDP rule verifies against its own GET with fresh ids', async () => {
+// Runs the full create + verify path; `mutate` edits the rule the fake GET returns.
+async function createWithGet(mutate) {
   const previous = { fetch: globalThis.fetch, env: { ...process.env } };
   Object.assign(process.env, {
     AUTOMATION_API_EMAIL: 'automation@example.test',
@@ -213,13 +242,25 @@ test('the SDP rule verifies against its own GET with fresh ids', async () => {
       created = JSON.parse(options.body).rule;
       return { status: 201, text: async () => JSON.stringify({ ruleUuid: 'r1' }) };
     }
-    return { status: 200, text: async () => JSON.stringify({ rule: { ...reassignIds(created), extra: 'meta' } }) };
+    const rule = { ...reassignIds(created), extra: 'meta' };
+    mutate(rule);
+    return { status: 200, text: async () => JSON.stringify({ rule }) };
   };
   try {
-    const result = await createJiraAutomationRule({ ruleSpec: JSON.stringify(SPEC) });
-    assert.equal(result.ok, true, JSON.stringify(result));
+    return await createJiraAutomationRule({ ruleSpec: JSON.stringify(SPEC) });
   } finally {
     globalThis.fetch = previous.fetch;
     process.env = previous.env;
   }
+}
+
+test('the SDP rule verifies against its own GET with fresh ids', async () => {
+  const result = await createWithGet(() => {});
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test('verification fails when the GET has lost a trigger condition', async () => {
+  const result = await createWithGet((rule) => { rule.trigger.conditions.pop(); });
+  assert.equal(result.ok, false);
+  assert.match(JSON.stringify(result), /Retrieved trigger conditions did not match/);
 });

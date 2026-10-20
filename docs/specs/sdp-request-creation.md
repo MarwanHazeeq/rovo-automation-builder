@@ -37,8 +37,8 @@ Field changed, on the field "Send to Customer ITSM".
 The rule must only act when the ticket is flagged for forwarding
 ("Send to Customer ITSM" equals "Yes") AND no SDP request id is recorded yet
 (the "Customer ITSM Incident" field is empty). These two checks gate
-everything below. If the builder cannot put them in front of the setup steps,
-say so; do not move the setup steps inside a branch.
+everything below. Put them in `trigger.conditions`, on the trigger itself, so
+they guard the setup steps; do not move the setup steps inside a branch.
 
 ### Setup steps (run every time, in this order, before any branch)
 

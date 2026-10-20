@@ -1708,6 +1708,17 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
   const triggerId = randomUUID();
   const context = { projectId, fieldMetadata };
 
+  // Optional checks on the trigger itself: they gate the WHOLE rule, setup
+  // actions included, which a condition inside a branch cannot do. The export
+  // (SDP-Jira.txt) hangs them on the trigger with conditionParentId = the
+  // trigger id and parentId null, and the trigger carries no match type, so
+  // every check must pass. buildCondition produces exactly that wiring.
+  if (trigger.conditions !== undefined && !Array.isArray(trigger.conditions)) {
+    throw new Error('trigger.conditions must be an array.');
+  }
+  const triggerConditions = (trigger.conditions ?? []).map((condition) =>
+    buildCondition(condition, triggerId, fieldMetadata));
+
   // `branches` is the general form: one if.block per entry. The flat
   // conditions + actions input is just a single branch, so both go through the
   // same block-building code.
@@ -1765,7 +1776,7 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
         type: trigger.type,
         value: triggerBuilder.buildValue(trigger, scope),
         connectionId: null,
-        conditions: [],
+        conditions: triggerConditions,
         id: triggerId,
       },
       components,
@@ -1785,6 +1796,8 @@ function buildRulePayload(spec, configuredCloudId, actorAccountId, fieldMetadata
  */
 function collectSpecParts(spec) {
   const parts = [spec];
+  // The trigger's own conditions are scanned like any other block's.
+  if (Array.isArray(spec?.trigger?.conditions)) parts.push({ conditions: spec.trigger.conditions });
   if (spec && typeof spec === 'object' && Array.isArray(spec.branches)) {
     for (const branch of spec.branches) parts.push(...collectSpecParts(branch));
   }
@@ -2318,6 +2331,13 @@ function verifyCreatedRule(retrieved, expectedScope, expectedRule) {
 
   if (!componentsContainExpectedValues(actualRule.components, expectedRule.components)) {
     return { ok: false, error: 'Retrieved conditions or actions did not match the request.' };
+  }
+
+  // A dropped trigger condition would remove the gate in front of the whole
+  // rule, so compare those too (only when some were requested).
+  if (expectedRule.trigger?.conditions?.length > 0 &&
+      !componentsContainExpectedValues(actualRule.trigger?.conditions, expectedRule.trigger.conditions)) {
+    return { ok: false, error: 'Retrieved trigger conditions did not match the request.' };
   }
 
   return { ok: true };

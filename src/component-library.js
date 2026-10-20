@@ -810,7 +810,10 @@ const STRUCTURAL_LIBRARY = {
         'nested if/else.',
       ruleSpec: {
         name: 'Worked example: setup actions, branches, nesting',
-        trigger: { type: 'jira.issue.event.trigger:created' },
+        trigger: {
+          type: 'jira.issue.event.trigger:created',
+          conditions: [{ type: 'jira.comparator.condition', value: { first: '{{issue.priority.name}}', operator: 'NOT_EQUALS', second: '' } }],
+        },
         actions: [
           { type: 'codebarrel.action.log', value: 'always runs first' },
           {

@@ -32,7 +32,9 @@ Drafting a new rule:
    A request where some steps always happen and later steps depend on a
    result is still ONE rule (setup actions plus branches), never several
    rules and never one flattened block. Never put
-   jira.condition.container.block in "actions". The workedExample on
+   jira.condition.container.block in "actions". A check that must hold for
+   the whole rule, setup actions included (for example "only when this
+   field is Yes"), goes in "trigger.conditions", not in a branch. The workedExample on
    jira.condition.container.block in get-component-reference shows the shape.
 3. Call draft-automation-rule with ruleSpec, requestText and a one or two
    sentence requestSummary of what the user asked for. requestText is the

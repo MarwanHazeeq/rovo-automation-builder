@@ -33,6 +33,9 @@ const USAGE_NOTES = [
     'Steps that always run before the branches go in top-level `actions` next to `branches`; a ' +
     'branch can hold nested `branches`. Setup then branching is still ONE rule: see workedExample ' +
     'on jira.condition.container.block.',
+  'A check that must hold for the WHOLE rule, setup actions included, goes in `trigger.conditions` ' +
+    '(an array of ordinary conditions, next to the trigger `type`), not in a branch. Every one must ' +
+    'pass; there is no ALL/ANY choice there, so do not send conditionMatchType for them.',
   'There is no iteration component. Per issue, use the jira.jql.scheduled trigger. Per list item, ' +
     'use {{#list}}...{{/}} inside a jira.create.variable step.',
   'Read a web-request response as {{webhookResponse.*}} or {{webResponse.*}}; when a spec names one, ' +
