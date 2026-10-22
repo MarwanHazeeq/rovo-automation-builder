@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BRANCH_WORDS, buildRulePayload, countBranches, findBranchWords, prepareRule } from '../src/index.js';
 import { buildCard } from '../src/mark-request-ready.js';
+import { createDraftActions } from '../src/drafts.js';
+import { createDraftStore } from '../src/draft-store.js';
+import { APPROVAL_ENV, fakeJira, fakeStorage } from './fakes.js';
 
 // Checks that run on what the agent sends, whatever the requester said: the
 // branch-word check on requestText, the refusal of values nobody supplied, and
@@ -204,4 +207,63 @@ test('the Teams card shows the target project, and omits the line when none is g
       .attachments[0].content.body[1].facts;
   assert.deepEqual(facts('SOCDemo (ID 10100)')[2], { title: 'Target project', value: 'SOCDemo (ID 10100)' });
   assert.equal(facts(null).length, 3);
+});
+
+// --- Issue #11: web request URLs are checked before any ticket is raised ----
+
+const WEBHOOK = (url) => ({ type: 'jira.issue.outgoing.webhook', value: { url, method: 'POST' } });
+
+test('a web request whose url is not a URL is refused, naming the component and the value', async () => {
+  const result = await prepare({ actions: [LOG('first'), WEBHOOK('https://ok.example.com/a'), WEBHOOK('<SYNC_SERVICE_URL>')] });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /the url of the 2nd web request action is "<SYNC_SERVICE_URL>"/);
+  assert.match(result.error, /\.invalid/);
+});
+
+test('a refused URL never quotes the query string, where a signature would sit', async () => {
+  const result = await prepare({ actions: [WEBHOOK('https://<HOST>/invoke?sig=SECRETSIG')] });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /"https:\/\/<HOST>\/invoke"/);
+  assert.ok(!result.error.includes('SECRETSIG'));
+});
+
+test('a non-http scheme is refused', async () => {
+  const result = await prepare({ actions: [WEBHOOK('ftp://files.example.com/drop')] });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /the url of the 1st web request action is "ftp:\/\/files\.example\.com\/drop"/);
+});
+
+test('a URL containing smart values is accepted, and so are the SDP stand-in URLs', async () => {
+  for (const url of [
+    'https://api.example.com/issues/{{issue.key}}?project={{issue.project.key}}',
+    'https://token-host.invalid/oauth/v2/token',
+    'https://sdp-host.invalid/api/v3/requests',
+    'https://sync-service.invalid/sync',
+  ]) {
+    const result = await prepare({ actions: [WEBHOOK(url)] });
+    assert.equal(result.ok, true, `${url}: ${result.error}`);
+  }
+});
+
+test('a bad URL raises no approval ticket and stores no draft', async () => {
+  const storage = fakeStorage();
+  const jira = fakeJira();
+  const actions = createDraftActions({
+    jira,
+    store: createDraftStore(storage),
+    getEnv: () => APPROVAL_ENV,
+    prepare: (payload) => withForgeEnvironment(projectSearch, () => prepareRule(payload)),
+    markReady: async () => ({ ok: true }),
+  });
+  const result = await actions.draftAutomationRule({
+    requestText: 'Call the sync service when an issue is created.',
+    ruleSpec: JSON.stringify({
+      name: 'Sync', projectName: 'SOCDemo', trigger: { type: 'jira.issue.event.trigger:created' },
+      actions: [WEBHOOK('<SYNC_SERVICE_URL>')],
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /1st web request action/);
+  assert.equal(jira.calls.createIssue.length, 0);
+  assert.equal(storage.data.size, 0);
 });

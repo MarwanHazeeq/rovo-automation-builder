@@ -50,7 +50,7 @@ const SPEC = {
     {
       type: 'jira.issue.outgoing.webhook',
       value: {
-        url: 'https://<TOKEN_HOST>/oauth/v2/token',
+        url: 'https://token-host.invalid/oauth/v2/token',
         method: 'POST',
         headers: [{ id: '_header_1', name: 'Content-Type', value: 'application/x-www-form-urlencoded', headerSecure: false }],
         contentType: 'custom',
@@ -74,7 +74,7 @@ const SPEC = {
     {
       type: 'jira.issue.outgoing.webhook',
       value: {
-        url: 'https://<SDP_HOST>/api/v3/requests',
+        url: 'https://sdp-host.invalid/api/v3/requests',
         method: 'POST',
         headers: [
           { id: '_header_2', name: 'Content-Type', value: 'application/x-www-form-urlencoded', headerSecure: false },
@@ -107,7 +107,7 @@ const SPEC = {
             {
               type: 'jira.issue.outgoing.webhook',
               value: {
-                url: 'https://<SYNC_SERVICE_URL>',
+                url: 'https://sync-service.invalid/sync',
                 method: 'POST',
                 headers: [
                   { id: '_header_4', name: 'Content-Type', value: 'application/json', headerSecure: false },
@@ -190,9 +190,9 @@ test('the comments/attachments check is nested inside the accepted block, after 
   for (const a of inner.children) assert.equal(a.parentId, inner.id);
 });
 
-test('placeholder credentials survive verbatim in the built payload', () => {
+test('stand-in credentials and URLs survive verbatim in the built payload', () => {
   const text = JSON.stringify(build().rule);
-  for (const placeholder of ['<SDP_CLIENT_ID>', '<SDP_CLIENT_SECRET>', '<SYNC_AUTH_KEY>', '<TOKEN_HOST>', '<SDP_HOST>', '<SYNC_SERVICE_URL>']) {
+  for (const placeholder of ['<SDP_CLIENT_ID>', '<SDP_CLIENT_SECRET>', '<SYNC_AUTH_KEY>', 'token-host.invalid', 'sdp-host.invalid', 'sync-service.invalid']) {
     assert.ok(text.includes(placeholder), `${placeholder} missing`);
   }
 });

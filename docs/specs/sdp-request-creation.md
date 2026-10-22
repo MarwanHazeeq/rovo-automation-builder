@@ -15,19 +15,29 @@ instance. Name it "SDP request creation".
 
 ### Credentials: read this first
 
-Every secret below is a placeholder written in angle brackets, for example
-`<SDP_CLIENT_SECRET>`. Pass each one into the rule exactly as written,
-character for character. Never invent, guess or "improve" a value. A human
-replaces them in the Jira UI before the rule is enabled, which is why the
-rule is created disabled.
+Every value a human must replace is a stand-in. Pass each one into the rule
+exactly as written, character for character. Never invent, guess or
+"improve" a value. A human replaces them in the Jira UI before the rule is
+enabled, which is why the rule is created disabled, and the approval ticket
+lists every stand-in it finds.
 
-| Placeholder | Where it goes |
+There are two kinds, on purpose:
+
+- **URLs** are full addresses on a reserved `.invalid` domain, e.g.
+  `https://token-host.invalid/oauth/v2/token`. Jira checks a web request's
+  URL when the rule is created, so an angle-bracket URL would be refused;
+  a `.invalid` host passes that check and can never reach a real server.
+- **Credentials and header values** are angle-bracket placeholders, e.g.
+  `<SDP_CLIENT_SECRET>`. Jira does not check them, and the brackets make an
+  unreplaced one obvious.
+
+| Stand-in | Where it goes |
 | --- | --- |
 | `<SDP_CLIENT_ID>` | query of the `ClientID` variable |
 | `<SDP_CLIENT_SECRET>` | query of the `ClientSecret` variable |
-| `<TOKEN_HOST>` | host in the token request URL |
-| `<SDP_HOST>` | host in the SDP request URL |
-| `<SYNC_SERVICE_URL>` | the whole sync-service URL (host, path and signature) |
+| `token-host.invalid` | host in the token request URL |
+| `sdp-host.invalid` | host in the SDP request URL |
+| `https://sync-service.invalid/sync` | the whole sync-service URL (host, path and signature) |
 | `<SYNC_AUTH_KEY>` | value of the `Auth-Key` header on the sync-service call |
 
 ### Trigger
@@ -44,7 +54,7 @@ they guard the setup steps; do not move the setup steps inside a branch.
 
 1. Variable `ClientID` = `<SDP_CLIENT_ID>`.
 2. Variable `ClientSecret` = `<SDP_CLIENT_SECRET>`.
-3. Token request: POST `https://<TOKEN_HOST>/oauth/v2/token`, header
+3. Token request: POST `https://token-host.invalid/oauth/v2/token`, header
    `Content-Type: application/x-www-form-urlencoded`, custom body
    `client_id={{ClientID}}&client_secret={{ClientSecret}}&grant_type=client_credentials&scope=SDPOnDemand.requests.ALL`.
 4. Variable `AuthToken` = `Bearer {{webResponse.body.access_token}}`.
@@ -59,7 +69,7 @@ they guard the setup steps; do not move the setup steps inside a branch.
 10. Variable `sdppayload` = a JSON object
     `{"request":{"subject":"{{issue.summary.jsonEncode}}","description":"{{issue.description.jsonEncode}}","udf_fields":{"udf_char31":"{{issue.key}}"}}}`.
 11. Audit log write: `{{sdppayload}}`.
-12. SDP request: POST `https://<SDP_HOST>/api/v3/requests`, headers
+12. SDP request: POST `https://sdp-host.invalid/api/v3/requests`, headers
     `Content-Type: application/x-www-form-urlencoded` and
     `Accept: application/vnd.manageengine.sdp.v3+json`, custom body
     `input_data={{sdppayload.urlEncode}}`, with authentication switched on
@@ -88,7 +98,7 @@ and is checked after the accepted one.
    - `{{comment.attachments.size}}` greater than 0
 
    Its actions:
-   1. Sync-service request: POST `<SYNC_SERVICE_URL>`, headers
+   1. Sync-service request: POST `https://sync-service.invalid/sync`, headers
       `Content-Type: application/json` and `Auth-Key: <SYNC_AUTH_KEY>`
       (secret header), custom body
       `{"jiraTicketKey":"{{issue.key}}","SDPToken":"{{AuthToken}}","SDPRequestID":"{{webhookResponse.body.request.id}}"}`.

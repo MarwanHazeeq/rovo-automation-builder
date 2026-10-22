@@ -1,4 +1,6 @@
-import { canonicalJson, sha256, redactSecrets, walkComponents } from './index.js';
+import {
+  AUTH_PLACEHOLDER, canonicalJson, describeComponentPositions, parseHttpUrl, redactSecrets, redactUrl, sha256, walkComponents,
+} from './index.js';
 
 /**
  * Everything a human reads about a draft is rendered HERE, by code, from the
@@ -79,6 +81,64 @@ function describeIssueTarget(target, scope) {
     : `${target.action}: project ${target.projectId}, OUTSIDE this rule's project ${scopeProjectId}`;
 }
 
+// Domains reserved by RFC 2606 / RFC 6761: guaranteed never to resolve, so a
+// web request pointed at one can never hand its token or payload to a stranger.
+const RESERVED_HOST = /(^|\.)(invalid|example|test|localhost)$|(^|\.)example\.(com|net|org)$/i;
+
+// Angle-bracket placeholder text such as "<SDP_CLIENT_SECRET>". At least one
+// capital letter is required so ordinary markup like "<br>" is not listed.
+const PLACEHOLDER = /<(?=[^<>]*[A-Z])[A-Za-z][\w -]{1,60}>/g;
+
+/** Every string anywhere inside a component value, in order. */
+function stringLeaves(value, out = []) {
+  if (typeof value === 'string') out.push(value);
+  else if (Array.isArray(value)) value.forEach((entry) => stringLeaves(entry, out));
+  else if (value && typeof value === 'object') Object.values(value).forEach((entry) => stringLeaves(entry, out));
+  return out;
+}
+
+/** Visit the trigger, its conditions, then every component, in rule order. */
+function walkRule(rule, visit) {
+  if (rule.trigger && typeof rule.trigger === 'object') visit(rule.trigger);
+  walkComponents(rule.trigger?.conditions, visit);
+  walkComponents(rule.components, visit);
+}
+
+/**
+ * Stand-ins the app can detect in a built rule: values a human must replace in
+ * the Jira UI before the rule is enabled. Built from the payload, never from a
+ * fixed sentence, so the list names THIS rule's unfinished fields and is empty
+ * when there are none.
+ *
+ *   - a web request URL on a reserved domain (it passes Jira's create-time
+ *     check but is obviously not the real endpoint)
+ *   - angle-bracket placeholder text anywhere (credentials, headers, bodies)
+ *   - the Authorization header placeholder the app itself adds
+ *
+ * Only the stand-in itself is shown (the placeholder token, or the redacted
+ * URL), never the whole value it sits in, which may hold a real secret.
+ */
+export function findStandIns(rule) {
+  const positions = describeComponentPositions(rule);
+  const found = [];
+  walkRule(rule, (node) => {
+    const where = positions.get(node) ?? 'the rule';
+    if (node.type === 'jira.issue.outgoing.webhook') {
+      const host = parseHttpUrl(node.value?.url)?.hostname;
+      if (host && RESERVED_HOST.test(host)) {
+        found.push({ value: redactUrl(node.value.url), kind: 'URL on a reserved domain', where });
+      }
+    }
+    const tokens = new Set();
+    for (const leaf of stringLeaves(node.value)) {
+      for (const match of leaf.match(PLACEHOLDER) ?? []) tokens.add(match);
+      if (leaf === AUTH_PLACEHOLDER) tokens.add(AUTH_PLACEHOLDER);
+    }
+    for (const token of tokens) found.push({ value: token, kind: 'placeholder', where });
+  });
+  return found;
+}
+
 // --- ADF node helpers -------------------------------------------------------
 
 const text = (value, marks) => ({ type: 'text', text: String(value), ...(marks ? { marks } : {}) });
@@ -153,9 +213,21 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       [strong('State on creation: '), text('DISABLED (a human enables it)')],
       [strong('Digest: '), code(digest)],
     ]),
+    ...renderStandIns(findStandIns(rule)),
     attachmentLine,
     paragraph(text('Any member of the approver group can review this. Approve to have the agent create exactly this rule. Request Changes to have it revised. Reject to cancel.'))
   );
+}
+
+// The section's presence is the signal, so it is left out entirely when there
+// is nothing to replace rather than shown empty.
+function renderStandIns(standIns) {
+  if (standIns.length === 0) return [];
+  return [
+    heading(4, 'Stand-ins to replace'),
+    paragraph(strong('This rule stays DISABLED. Do not enable it until every item below is replaced in the Jira UI.')),
+    bulletList(standIns.map(({ value, kind, where }) => [code(value), text(` (${kind}) in ${where}`)])),
+  ];
 }
 
 /** The comment posted after the create action created the rule. */
