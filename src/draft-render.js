@@ -355,18 +355,140 @@ export function renderCreatedComment(record, { message, selfApproved, manualStep
   );
 }
 
-/** A comment explaining that nothing was created, and why. */
-export function renderNotCreatedComment(reason) {
-  return doc(
-    heading(3, 'Rule NOT created'),
-    paragraph(text(reason))
-  );
+// --- why a create failed ------------------------------------------------------
+
+// Atlassian's text and error messages can quote a URL; keep only its safe parts.
+const scrubUrls = (value) => String(value).replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactUrl(url));
+const clip = (value, max = 300) => (value.length > max ? `${value.slice(0, max)}...` : value);
+
+/**
+ * Find the component an Atlassian field error is about, in words a person can
+ * use. Errors name components like "component:__NEW__ACTION__<uuid>.url", and
+ * on create that uuid is a fresh one Atlassian made up, NOT the id this app
+ * sent (seen on the live SDP run). So an exact id match is used when there is
+ * one, and otherwise every component of that kind that has that field is
+ * listed as a candidate. The uuid itself is never shown: it appears nowhere a
+ * human can look.
+ */
+function locateFieldError(field, rule, positions) {
+  const match = /^component:(?:__NEW__([A-Z_]+?)__)?([^.]+)\.(.+)$/.exec(String(field ?? ''));
+  if (!match) {
+    return field ? `field "${String(field).replace(/__NEW__\w+?__[0-9a-f-]+/gi, 'a new component')}"` : 'no field named';
+  }
+  const [, kind, id, path] = match;
+  const key = path.split(/[.[]/)[0];
+  const nodes = [];
+  walkRule(rule, (node) => nodes.push(node));
+
+  const exact = nodes.find((node) => node.id === id);
+  if (exact) return `field "${path}" on ${positions.get(exact)}`;
+  const candidates = nodes.filter((node) =>
+    (!kind || node.component === kind) && node.value && typeof node.value === 'object' && key in node.value);
+  if (candidates.length === 1) return `field "${path}" on ${positions.get(candidates[0])}`;
+  if (candidates.length > 1) {
+    return `field "${path}" on one of: ${candidates.map((node) => positions.get(node)).join('; ')}`;
+  }
+  return `field "${path}" on ${kind ? `a component of kind ${kind}` : 'a component'} that could not be matched to the rule`;
 }
 
-/** A comment for an outcome a human has to check (e.g. creation outcome unknown). */
+/**
+ * Turn a failed createAndVerifyRule result into what a human needs to act:
+ *   what       - the HTTP status and Atlassian's own message
+ *   where      - one line per field error, naming the component
+ *   nextStep   - chosen from the failure, not a fixed sentence
+ *   ruleExists - stated either way, because it decides whether a new request is safe
+ * Pure: `rule` is the frozen draft that was sent, used only to name components.
+ * Atlassian's text is quoted as data, URLs in it are redacted, and component
+ * values are never echoed.
+ */
+export function explainCreateFailure(result, rule = {}) {
+  const status = Number.isInteger(result?.status) ? result.status : null;
+  const apiError = result?.apiError;
+  const errors = Array.isArray(apiError?.errors) ? apiError.errors : [];
+  const ruleUuid = typeof result?.ruleUuid === 'string' ? result.ruleUuid : null;
+  const outcomeUnknown = result?.outcomeUnknown === true;
+
+  const atlassianMessage = errors.length
+    ? [...new Set(errors.map((entry) => entry?.title ?? entry?.message).filter(Boolean))].join('; ')
+    : typeof apiError === 'string' ? apiError : apiError?.message ?? '';
+  const what = scrubUrls(clip(status === null
+    ? String(result?.error ?? 'unknown error')
+    : `${result?.error ?? 'Jira refused the request.'} HTTP ${status}${atlassianMessage ? `: ${atlassianMessage}` : ''}`, 600));
+
+  const positions = describeComponentPositions(rule);
+  const where = errors.map((entry) =>
+    scrubUrls(`${clip(String(entry?.title ?? entry?.message ?? 'Error'))}: ${locateFieldError(entry?.field, rule, positions)}`));
+
+  let nextStep;
+  if (ruleUuid) {
+    nextStep =
+      `The rule EXISTS in Jira and is DISABLED (ruleUuid ${ruleUuid}). Open it in Project settings > Automation ` +
+      'and check it against the attached draft. Do NOT raise a new request for it: that would create a second copy.';
+  } else if (outcomeUnknown) {
+    nextStep =
+      `It is not known whether the rule was created. Look in the project's automation rules for one named ` +
+      `"${rule.name ?? 'this rule'}" before doing anything else, and raise a new request only if it is not there.`;
+  } else if (status === 401 || status === 403) {
+    nextStep =
+      'Jira refused the app\'s own Automation API credentials (the AUTOMATION_API_EMAIL / AUTOMATION_API_TOKEN ' +
+      'Forge variables), not the requester\'s permissions. Ask the app admin to fix them, then raise a new request.';
+  } else if (status === 429 || (status !== null && status >= 500) || result?.networkError === true) {
+    nextStep =
+      'This looks temporary (Jira or the network failed, not the rule). Raise a new request with the same rule; ' +
+      'if it fails the same way, ask the app admin to check the Forge logs.';
+  } else if (status !== null && errors.length > 0) {
+    nextStep =
+      'Fix the field(s) named under Where in the request, then raise a new request. This ticket\'s draft cannot be ' +
+      'created again.';
+  } else if (status !== null) {
+    nextStep =
+      'Jira refused the rule without naming a field. Compare the attached draft with the component reference, ' +
+      'fix the request and raise a new one.';
+  } else {
+    nextStep = 'The app refused the stored draft before sending it, for the reason above. Fix the request and raise a new one.';
+  }
+
+  const ruleInJira = ruleUuid
+    ? `Yes: a DISABLED rule exists (ruleUuid ${ruleUuid}).`
+    : outcomeUnknown
+      ? 'Unknown: check before raising a new request.'
+      : 'No: nothing was created, so a new request is safe.';
+
+  return { what, where, nextStep, ruleExists: Boolean(ruleUuid), outcomeUnknown, ruleInJira };
+}
+
+/** The same explanation as one sentence block, for the agent to relay verbatim. */
+export function summarizeCreateFailure(explanation) {
+  const { what, where, nextStep, ruleExists, outcomeUnknown } = explanation;
+  const opening = ruleExists
+    ? 'The rule WAS created but could not be verified.'
+    : outcomeUnknown ? 'It is not known whether the rule was created.' : 'No automation rule was created.';
+  return [
+    opening,
+    `What failed: ${what}`,
+    ...(where.length ? [`Where: ${where.join(' | ')}`] : []),
+    `What to do: ${nextStep}`,
+  ].join(' ');
+}
+
+// A plain string (an approval refusal) is shown as before; an explanation from
+// explainCreateFailure gets What failed / Where / What to do / Rule in Jira.
+function failureBody(reason) {
+  if (typeof reason === 'string') return [paragraph(text(reason))];
+  return [
+    paragraph(strong('What failed: '), text(reason.what)),
+    ...(reason.where.length ? [paragraph(strong('Where:')), bulletList(reason.where.map((line) => [text(line)]))] : []),
+    paragraph(strong('What to do: '), text(reason.nextStep)),
+    paragraph(strong('Rule in Jira: '), text(reason.ruleInJira)),
+  ];
+}
+
+/** A comment explaining that nothing was created, and why. */
+export function renderNotCreatedComment(reason) {
+  return doc(heading(3, 'Rule NOT created'), ...failureBody(reason));
+}
+
+/** A comment for an outcome a human has to check (created but unverified, or unknown). */
 export function renderAttentionComment(reason) {
-  return doc(
-    heading(3, 'Needs attention'),
-    paragraph(text(reason))
-  );
+  return doc(heading(3, 'Needs attention'), ...failureBody(reason));
 }

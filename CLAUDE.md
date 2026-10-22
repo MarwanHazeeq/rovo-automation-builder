@@ -103,6 +103,10 @@ the caller nothing: creation is authorised by the ticket's changelog, not by who
   so `addAttachment` builds the multipart body by hand. Jira needs `X-Atlassian-Token: no-check`.
 - Redaction writes `[redacted]` (`redactSecrets`); `<PLACEHOLDER>` is only for sample exports.
 - `trigger.events` shape for issue-created is unconfirmed; it is passed through as-is.
+- Create-time errors name components as `component:__NEW__ACTION__<uuid>.<field>`, and that uuid is
+  Atlassian's own, NOT the id we sent. `explainCreateFailure` lists candidate components instead.
+- Jira validates a web request `url` at create time (even DISABLED) but not header or body values, so
+  `validateRulePayload` refuses non-http(s) URLs up front; URL stand-ins go on `.invalid` hosts.
 - The SLA smart-value path in README.md (`completedCycles.last.elapsedTime.millis`) is
   unverified on the site.
 - Corporate network: Node uses `NODE_EXTRA_CA_CERTS` (set in the user's environment, not this

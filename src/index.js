@@ -765,7 +765,9 @@ export async function createAndVerifyRule({ rule: preparedRule }) {
     console.log(`[createJiraAutomationRule] create response status: ${createResponse.status}`);
   } catch (error) {
     console.error(`[createJiraAutomationRule] create request threw: ${error.message}`);
-    return failure(`The create request could not be sent: ${error.message}`);
+    // networkError lets the ticket call this transient rather than a problem
+    // with the rule (see explainCreateFailure in draft-render.js).
+    return failure(`The create request could not be sent: ${error.message}`, { networkError: true });
   }
 
   if (createResponse.status !== 201) {
