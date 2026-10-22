@@ -415,3 +415,39 @@ test('a revised draft carries the stand-in section too', async () => {
   assert.match(body, /Draft v2/);
   assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in the 1st web request action/);
 });
+
+// --- Issue #13: web-response reads on the draft comment --------------------
+
+const READ_COMPONENTS = [
+  ...STAND_IN_COMPONENTS,
+  { component: 'ACTION', type: 'jira.issue.comment', value: { comment: 'Sync said {{webhookResponse.body}}' }, conditions: [], children: [] },
+];
+
+test('the draft comment lists each web-response read verbatim, under its request', async () => {
+  const { jira, actions } = setup({ prepare: preparedWith(READ_COMPONENTS) });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  const body = adfText(jira.calls.addComment[0].body);
+  assert.match(body, /Web response reads/);
+  assert.match(body, /After the 1st web request action:\s+\{\{webhookResponse\.body\}\}\s+in the 1st comment action/);
+});
+
+test('a web request with no reads still gets the section, saying so', async () => {
+  const { jira, actions } = setup({ prepare: preparedWith(STAND_IN_COMPONENTS) });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.match(adfText(jira.calls.addComment[0].body), /After the 1st web request action:\s+No reads of this response/);
+});
+
+test('a rule with no web request has no web-response section', async () => {
+  const { jira, actions } = setup();
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.doesNotMatch(adfText(jira.calls.addComment[0].body), /Web response reads/);
+});
+
+test('a revised draft carries the web-response section too', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWith(READ_COMPONENTS), getEnv: () => APPROVAL_ENV,
+  });
+  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+  assert.match(adfText(ctx.jira.calls.addComment[0].body), /Web response reads/);
+});

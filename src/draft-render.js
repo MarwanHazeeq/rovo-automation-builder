@@ -139,6 +139,95 @@ export function findStandIns(rule) {
   return found;
 }
 
+// A smart value that reads a web request's response, e.g.
+// "{{webResponse.body.access_token}}" or "{{webhookResponse.status}}".
+const WEB_RESPONSE_READ = /\{\{\s*(?:webResponse|webhookResponse)\b[^}]*\}\}/g;
+
+/**
+ * Every web-response read in a rule, grouped under the web request whose
+ * response it actually gets: the most recent request before it that has run
+ * (a later request overwrites the response).
+ *
+ * "Has run" is why this is not a plain rule-order walk. The branches of an
+ * if/else group are exclusive, so a request in the accepted branch never
+ * precedes a read in the rejected branch even though it is above it on the
+ * page. Each branch therefore starts from the response the group was entered
+ * with. After a group (or a lone if-block) in which a request was sent, which
+ * response is live depends on the branch taken, and the group heading says so.
+ *
+ * The app cannot tell whether an accessor is right; the spec it would be
+ * checked against never reaches the app. This makes the actual strings
+ * visible so an approver who knows the rule can catch a wrong one.
+ *
+ * Returns { hasWebRequest, groups: [{ request, reads: [{ accessor, where: [] }] }] }.
+ * `request` is null for reads before any request. Identical accessors in one
+ * group are merged into one entry listing all their positions, so a long rule
+ * stays short. A request's OWN value (e.g. its body) is read before it is sent,
+ * so those reads count toward the previous request.
+ */
+export function findWebResponseReads(rule) {
+  const positions = describeComponentPositions(rule);
+  // `sent` marks a real request group, which is shown even with no reads (an
+  // unread response is worth seeing too). The other groups show only if read.
+  const startGroup = (request, sent) => {
+    const group = { request, sent, reads: new Map() };
+    groups.push(group);
+    return group;
+  };
+  const groups = [];
+  let current = startGroup(null, false);
+
+  // Returns whether any request was sent within `nodes`.
+  const visit = (nodes) => {
+    let sentAny = false;
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      if (!node || typeof node !== 'object') continue;
+      const where = positions.get(node) ?? 'the rule';
+      for (const leaf of stringLeaves(node.value)) {
+        for (const accessor of leaf.match(WEB_RESPONSE_READ) ?? []) {
+          const places = current.reads.get(accessor) ?? [];
+          if (!places.includes(where)) places.push(where);
+          current.reads.set(accessor, places);
+        }
+      }
+      if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook') {
+        current = startGroup(where, true);
+        sentAny = true;
+      }
+
+      const entry = current;
+      let sentInside = false;
+      if (node.type === 'jira.condition.container.block') {
+        for (const branch of Array.isArray(node.children) ? node.children : []) {
+          current = entry;
+          if (visit([branch])) sentInside = true;
+        }
+      } else {
+        // Both walks must run, so no short-circuiting `||` here.
+        const inConditions = visit(node.conditions);
+        const inChildren = visit(node.children);
+        sentInside = inConditions || inChildren;
+      }
+      if (node.type === 'jira.condition.container.block' || node.type === 'jira.condition.if.block') {
+        current = sentInside
+          ? startGroup(`whichever request ran last in ${where} (it depends on the branch taken)`, false)
+          : entry;
+      }
+      sentAny = sentAny || sentInside;
+    }
+    return sentAny;
+  };
+  if (rule.trigger && typeof rule.trigger === 'object') visit([rule.trigger]);
+  visit(rule.components);
+
+  return {
+    hasWebRequest: groups.some((group) => group.sent),
+    groups: groups
+      .filter((group) => group.sent || group.reads.size > 0)
+      .map(({ request, reads }) => ({ request, reads: [...reads].map(([accessor, where]) => ({ accessor, where })) })),
+  };
+}
+
 // --- ADF node helpers -------------------------------------------------------
 
 const text = (value, marks) => ({ type: 'text', text: String(value), ...(marks ? { marks } : {}) });
@@ -213,10 +302,30 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       [strong('State on creation: '), text('DISABLED (a human enables it)')],
       [strong('Digest: '), code(digest)],
     ]),
+    ...renderWebResponseReads(findWebResponseReads(rule)),
     ...renderStandIns(findStandIns(rule)),
     attachmentLine,
     paragraph(text('Any member of the approver group can review this. Approve to have the agent create exactly this rule. Request Changes to have it revised. Reject to cancel.'))
   );
+}
+
+// Shown on EVERY draft with a web request, not only when something looks wrong:
+// the app cannot know what is wrong, and a section that appears only sometimes
+// trains people to skim it. Accessors are code-marked text: data, not markup.
+function renderWebResponseReads({ hasWebRequest, groups }) {
+  if (!hasWebRequest) return [];
+  return [
+    heading(4, 'Web response reads'),
+    paragraph(text('Each read gets the response of the web request it is listed under; a later request ' +
+      'overwrites it. Check every accessor is exactly the one this rule needs (webResponse and ' +
+      'webhookResponse are not interchangeable).')),
+    ...groups.flatMap(({ request, reads }) => [
+      paragraph(strong(request ? `After ${request}:` : 'Before any web request:')),
+      reads.length
+        ? bulletList(reads.map(({ accessor, where }) => [code(accessor), text(` in ${where.join('; ')}`)]))
+        : paragraph(text('No reads of this response.')),
+    ]),
+  ];
 }
 
 // The section's presence is the signal, so it is left out entirely when there
