@@ -2279,11 +2279,63 @@ function redactSecrets(value) {
       out[key] = entry.map((header) => ({ ...header, value: '[redacted]' }));
     } else if (/token|secret|password|authorization|webhook_?url/i.test(key)) {
       out[key] = '[redacted]';
+    } else if (key === 'url' && typeof entry === 'string') {
+      out[key] = redactUrl(entry);
     } else {
       out[key] = redactSecrets(entry);
     }
   }
   return out;
+}
+
+/**
+ * Parse a web request URL the way Jira will see it, or return null.
+ *
+ * A URL may legitimately contain smart values ("https://host/{{issue.key}}"),
+ * which only become real text when the rule runs. Each {{...}} span is swapped
+ * for a harmless "x" before parsing, so those pass while placeholder text such
+ * as "<SYNC_SERVICE_URL>" (angle brackets are not allowed in a host) does not.
+ * Only http and https count: a web request cannot call anything else.
+ */
+function parseHttpUrl(text) {
+  if (typeof text !== 'string') return null;
+  try {
+    const url = new URL(text.replace(/\{\{[^}]*\}\}/g, 'x'));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Redact the secret PARTS of a URL and keep the rest readable.
+ *
+ * The secret in a signed URL (a Logic App's ?sig=..., a token in the query, a
+ * user:password@ prefix) is never the host or the path, and the host and path
+ * are exactly what a person needs to tell which call failed. So:
+ *   - userinfo becomes "[redacted]@"
+ *   - every query value becomes "[redacted]" (the parameter names stay);
+ *     a bare "?abc" with no "=" may itself be the secret, so it goes whole
+ *   - a fragment becomes "#[redacted]"
+ * The ORIGINAL string is edited rather than re-serialised through URL, which
+ * would percent-encode smart values ("{{" -> "%7B%7B") and make them unreadable.
+ * A URL that does not parse cannot be picked apart safely, so it is replaced whole.
+ */
+function redactUrl(url) {
+  if (!parseHttpUrl(url)) return '[redacted]';
+
+  const hashAt = url.indexOf('#');
+  const withoutFragment = hashAt === -1 ? url : url.slice(0, hashAt);
+  const queryAt = withoutFragment.indexOf('?');
+  const base = queryAt === -1 ? withoutFragment : withoutFragment.slice(0, queryAt);
+
+  const query = queryAt === -1 ? '' : `?${withoutFragment.slice(queryAt + 1).split('&')
+    .map((pair) => (pair.includes('=') ? `${pair.slice(0, pair.indexOf('='))}=[redacted]` : '[redacted]'))
+    .join('&')}`;
+  const fragment = hashAt === -1 ? '' : '#[redacted]';
+
+  // Userinfo sits between "scheme://" and the first "@" before any "/".
+  return `${base.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1[redacted]@')}${query}${fragment}`;
 }
 
 function verifyCreatedRule(retrieved, expectedScope, expectedRule) {
@@ -2431,6 +2483,8 @@ export {
   canonicalJson,
   sha256,
   redactSecrets,
+  redactUrl,
+  parseHttpUrl,
   walkComponents,
   failure,
   safeStringify,
