@@ -298,5 +298,41 @@ test('created-but-unverified says the rule exists and needs attention', async ()
   assert.equal(result.verified, false);
   const text = adfText(ctx.jira.calls.addComment[0].body);
   assert.match(text, /Needs attention/);
-  assert.match(text, /WAS created/);
+  assert.match(text, /rule EXISTS in Jira and is DISABLED \(ruleUuid uuid-9\)/);
+  assert.match(text, /Do NOT raise a new request/);
+  assert.match(text, /Rule in Jira:\s+Yes/);
+  assert.match(result.summary, /WAS created/);
+});
+
+test('a rejected create names every field error, a next step and that no rule exists, on the ticket and in the summary', async () => {
+  const ctx = await setup({
+    create: async () => ({
+      ok: false,
+      error: 'The Automation API rejected the create request.',
+      status: 400,
+      apiError: { errors: [
+        { status: 400, title: 'Please enter a valid web request URL', field: 'component:__NEW__ACTION__36d72f7a-2b2e-4168-a54c-5669a207bb6e.url' },
+        { status: 400, title: 'Rule name is too long', field: 'name' },
+      ] },
+    }),
+  });
+  const result = await ctx.run();
+  const text = adfText(ctx.jira.calls.addComment[0].body);
+  assert.match(text, /Rule NOT created/);
+  assert.match(text, /HTTP 400: Please enter a valid web request URL; Rule name is too long/);
+  assert.match(text, /Please enter a valid web request URL: field "url" on a component of kind ACTION/);
+  assert.match(text, /Rule name is too long: field "name"/);
+  assert.match(text, /Fix the field\(s\) named under Where/);
+  assert.match(text, /Rule in Jira:\s+No/);
+  assert.ok(!text.includes('36d72f7a'));
+  assert.match(result.summary, /^No automation rule was created\. What failed: .*Where: .*What to do: Fix/);
+});
+
+test('a create that threw is reported as unknown and asks for a check before anything else', async () => {
+  const ctx = await setup({ create: async () => { throw new Error('socket hang up'); } });
+  const result = await ctx.run();
+  const text = adfText(ctx.jira.calls.addComment[0].body);
+  assert.match(text, /Needs attention/);
+  assert.match(text, /not known whether the rule was created/);
+  assert.match(result.summary, /It is not known whether the rule was created/);
 });

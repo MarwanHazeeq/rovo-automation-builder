@@ -331,6 +331,9 @@ const ACTION_LIBRARY = {
       authenticate: true,
     },
     notes:
+      'url must be a full http(s) URL (smart values allowed): the builder refuses anything else, because Jira ' +
+      'rejects it at create time. When the real address is not known, use a stand-in on a reserved domain such ' +
+      'as https://sync-service.invalid/path, never angle-bracket text; the approval ticket lists it for replacement. ' +
       'NEVER send an Authorization header: the builder rejects it. Set "authenticate": true instead and it ' +
       'adds an Authorization header holding a placeholder (REPLACE_ME_BEFORE_ENABLING) for a human to ' +
       'replace in the Automation UI before enabling the rule; omit it if the endpoint needs no auth. ' +

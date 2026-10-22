@@ -360,3 +360,94 @@ test('a revision does not mark the ticket again', async () => {
   assert.equal(result.ok, true);
   assert.equal(ctx.markReadyCalls.length, 1);
 });
+
+// --- Issue #11: the stand-in checklist on the draft comment ----------------
+
+/** A prepare() whose rule carries the given components, for renderer tests. */
+function preparedWith(components) {
+  return async () => {
+    const result = await preparedOk()();
+    return { ...result, rule: { ...result.rule, components } };
+  };
+}
+
+const STAND_IN_COMPONENTS = [
+  { component: 'ACTION', type: 'jira.create.variable', value: { name: { type: 'FREE', value: 'Secret' }, query: { type: 'SMART', value: '<SDP_CLIENT_SECRET>' } }, conditions: [], children: [] },
+  {
+    component: 'ACTION',
+    type: 'jira.issue.outgoing.webhook',
+    value: {
+      url: 'https://sync-service.invalid/sync?sig=SECRETSIG',
+      headers: [{ name: 'Auth-Key', value: '<SYNC_AUTH_KEY>' }, { name: 'X-Real', value: 'real-value-not-shown' }],
+      customBody: '{"key":"{{issue.key}}"}',
+    },
+    conditions: [],
+    children: [],
+  },
+];
+
+test('the draft comment lists every stand-in with its position, under a do-not-enable line', async () => {
+  const { jira, actions } = setup({ prepare: preparedWith(STAND_IN_COMPONENTS) });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  const body = adfText(jira.calls.addComment[0].body);
+  assert.match(body, /Stand-ins to replace/);
+  assert.match(body, /Do not enable it until every item below is replaced/);
+  assert.match(body, /<SDP_CLIENT_SECRET>\s+\(placeholder\) in the 1st create variable action/);
+  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in the 1st web request action/);
+  assert.match(body, /https:\/\/sync-service\.invalid\/sync\?sig=\[redacted\]\s+\(URL on a reserved domain\) in the 1st web request action/);
+  assert.ok(!body.includes('SECRETSIG'));
+  assert.ok(!body.includes('real-value-not-shown'));
+});
+
+test('a draft with no stand-ins has no stand-in section', async () => {
+  const { jira, actions } = setup();
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.doesNotMatch(adfText(jira.calls.addComment[0].body), /Stand-ins to replace/);
+});
+
+test('a revised draft carries the stand-in section too', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWith(STAND_IN_COMPONENTS), getEnv: () => APPROVAL_ENV,
+  });
+  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+  const body = adfText(ctx.jira.calls.addComment[0].body);
+  assert.match(body, /Draft v2/);
+  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in the 1st web request action/);
+});
+
+// --- Issue #13: web-response reads on the draft comment --------------------
+
+const READ_COMPONENTS = [
+  ...STAND_IN_COMPONENTS,
+  { component: 'ACTION', type: 'jira.issue.comment', value: { comment: 'Sync said {{webhookResponse.body}}' }, conditions: [], children: [] },
+];
+
+test('the draft comment lists each web-response read verbatim, under its request', async () => {
+  const { jira, actions } = setup({ prepare: preparedWith(READ_COMPONENTS) });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  const body = adfText(jira.calls.addComment[0].body);
+  assert.match(body, /Web response reads/);
+  assert.match(body, /After the 1st web request action:\s+\{\{webhookResponse\.body\}\}\s+in the 1st comment action/);
+});
+
+test('a web request with no reads still gets the section, saying so', async () => {
+  const { jira, actions } = setup({ prepare: preparedWith(STAND_IN_COMPONENTS) });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.match(adfText(jira.calls.addComment[0].body), /After the 1st web request action:\s+No reads of this response/);
+});
+
+test('a rule with no web request has no web-response section', async () => {
+  const { jira, actions } = setup();
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+  assert.doesNotMatch(adfText(jira.calls.addComment[0].body), /Web response reads/);
+});
+
+test('a revised draft carries the web-response section too', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedWith(READ_COMPONENTS), getEnv: () => APPROVAL_ENV,
+  });
+  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+  assert.match(adfText(ctx.jira.calls.addComment[0].body), /Web response reads/);
+});

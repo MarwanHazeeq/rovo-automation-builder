@@ -765,7 +765,9 @@ export async function createAndVerifyRule({ rule: preparedRule }) {
     console.log(`[createJiraAutomationRule] create response status: ${createResponse.status}`);
   } catch (error) {
     console.error(`[createJiraAutomationRule] create request threw: ${error.message}`);
-    return failure(`The create request could not be sent: ${error.message}`);
+    // networkError lets the ticket call this transient rather than a problem
+    // with the rule (see explainCreateFailure in draft-render.js).
+    return failure(`The create request could not be sent: ${error.message}`, { networkError: true });
   }
 
   if (createResponse.status !== 201) {
@@ -2202,6 +2204,29 @@ function validateRulePayload(requestBody, configuredCloudId) {
     return { ok: false, error: `ProForma forms must come from the rule's own project ${scopeMatch[2]}, not ${foreignForms.join(', ')}.` };
   }
 
+  // Jira validates a web request's URL when the rule is CREATED, even though
+  // it is created disabled. Caught there, a typo or a "<SYNC_SERVICE_URL>"
+  // placeholder costs a whole approval cycle, and the creation claim means the
+  // ticket cannot simply be retried. Caught here, nothing has been raised yet.
+  // The quoted value stops at "?" so a signed URL's signature is never echoed.
+  const positions = describeComponentPositions(rule);
+  const badUrls = [];
+  walkComponents(rule.components, (node) => {
+    if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook' && !parseHttpUrl(node.value?.url)) {
+      badUrls.push(`the url of ${positions.get(node)} is "${String(node.value?.url ?? '').split('?')[0]}"`);
+    }
+  });
+  if (badUrls.length > 0) {
+    return {
+      ok: false,
+      error:
+        `Every web request needs a full http(s) URL, but ${badUrls.join('; ')}. ` +
+        'If the real address cannot go in the request, use a stand-in on a reserved domain, e.g. ' +
+        'https://sync-service.invalid/path: it passes Jira\'s check, can never reach a real server, ' +
+        'and the approval ticket lists it as a stand-in to replace before enabling.',
+    };
+  }
+
   if (configuredCloudId !== scopeMatch[1]) {
     return {
       ok: false,
@@ -2266,6 +2291,65 @@ function walkComponents(components, visit) {
   }
 }
 
+// Words a person sees in the Automation UI, for the component types people most
+// need to find. Any other type is named by its type string, which is also what
+// the attached payload shows.
+const COMPONENT_NOUNS = Object.freeze({
+  'jira.issue.outgoing.webhook': 'web request action',
+  'jira.issue.comment': 'comment action',
+  'jira.create.variable': 'create variable action',
+  'jira.issue.edit': 'edit issue action',
+  'jira.comparator.condition': 'compare condition',
+  'jira.issue.condition': 'issue field condition',
+  'jira.condition.if.block': 'if-block',
+  'jira.condition.container.block': 'if/else group',
+});
+
+/** 1 -> "1st", 2 -> "2nd", 11 -> "11th", 23 -> "23rd". */
+function ordinal(n) {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  const suffix = teen ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] ?? 'th');
+  return `${n}${suffix}`;
+}
+
+/**
+ * Name every component of a rule the way a person can find it in the Jira UI:
+ * "the 2nd web request action", "the 1st comment action (inside the 3rd
+ * if-block)". Never a component id: ids are random, and Atlassian assigns new
+ * ones on create, so an id appears nowhere a human can look.
+ *
+ * Components are counted per type in rule order, the same depth-first order
+ * as walkComponents (a node, then its conditions, then its children), which is
+ * the top-to-bottom order the rule editor draws them in. The suffix names the
+ * nearest enclosing if-block, because "the 2nd comment action" alone is hard
+ * to spot in a rule with many branches. Trigger conditions say "(on the trigger)".
+ *
+ * Returns a Map keyed by the component OBJECTS of this `rule`, so look nodes up
+ * in the same object (not a redacted copy).
+ */
+function describeComponentPositions(rule) {
+  const labels = new Map();
+  const counts = new Map();
+  if (rule?.trigger && typeof rule.trigger === 'object') labels.set(rule.trigger, 'the trigger');
+
+  const visit = (components, where) => {
+    if (!Array.isArray(components)) return;
+    for (const node of components) {
+      if (!node || typeof node !== 'object') continue;
+      const count = (counts.get(node.type) ?? 0) + 1;
+      counts.set(node.type, count);
+      const label = `the ${ordinal(count)} ${COMPONENT_NOUNS[node.type] ?? `"${node.type}" ${node.component === 'ACTION' ? 'action' : 'component'}`}`;
+      labels.set(node, where ? `${label} (${where})` : label);
+      const inner = node.type === 'jira.condition.if.block' ? `inside ${label}` : where;
+      visit(node.conditions, inner);
+      visit(node.children, inner);
+    }
+  };
+  visit(rule?.trigger?.conditions, 'on the trigger');
+  visit(rule?.components, null);
+  return labels;
+}
+
 // Webhook actions carry Authorization headers and other secrets in their
 // value. The failure object is shown to the Rovo user, so strip anything that
 // looks like a credential before echoing the payload back.
@@ -2279,11 +2363,63 @@ function redactSecrets(value) {
       out[key] = entry.map((header) => ({ ...header, value: '[redacted]' }));
     } else if (/token|secret|password|authorization|webhook_?url/i.test(key)) {
       out[key] = '[redacted]';
+    } else if (key === 'url' && typeof entry === 'string') {
+      out[key] = redactUrl(entry);
     } else {
       out[key] = redactSecrets(entry);
     }
   }
   return out;
+}
+
+/**
+ * Parse a web request URL the way Jira will see it, or return null.
+ *
+ * A URL may legitimately contain smart values ("https://host/{{issue.key}}"),
+ * which only become real text when the rule runs. Each {{...}} span is swapped
+ * for a harmless "x" before parsing, so those pass while placeholder text such
+ * as "<SYNC_SERVICE_URL>" (angle brackets are not allowed in a host) does not.
+ * Only http and https count: a web request cannot call anything else.
+ */
+function parseHttpUrl(text) {
+  if (typeof text !== 'string') return null;
+  try {
+    const url = new URL(text.replace(/\{\{[^}]*\}\}/g, 'x'));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Redact the secret PARTS of a URL and keep the rest readable.
+ *
+ * The secret in a signed URL (a Logic App's ?sig=..., a token in the query, a
+ * user:password@ prefix) is never the host or the path, and the host and path
+ * are exactly what a person needs to tell which call failed. So:
+ *   - userinfo becomes "[redacted]@"
+ *   - every query value becomes "[redacted]" (the parameter names stay);
+ *     a bare "?abc" with no "=" may itself be the secret, so it goes whole
+ *   - a fragment becomes "#[redacted]"
+ * The ORIGINAL string is edited rather than re-serialised through URL, which
+ * would percent-encode smart values ("{{" -> "%7B%7B") and make them unreadable.
+ * A URL that does not parse cannot be picked apart safely, so it is replaced whole.
+ */
+function redactUrl(url) {
+  if (!parseHttpUrl(url)) return '[redacted]';
+
+  const hashAt = url.indexOf('#');
+  const withoutFragment = hashAt === -1 ? url : url.slice(0, hashAt);
+  const queryAt = withoutFragment.indexOf('?');
+  const base = queryAt === -1 ? withoutFragment : withoutFragment.slice(0, queryAt);
+
+  const query = queryAt === -1 ? '' : `?${withoutFragment.slice(queryAt + 1).split('&')
+    .map((pair) => (pair.includes('=') ? `${pair.slice(0, pair.indexOf('='))}=[redacted]` : '[redacted]'))
+    .join('&')}`;
+  const fragment = hashAt === -1 ? '' : '#[redacted]';
+
+  // Userinfo sits between "scheme://" and the first "@" before any "/".
+  return `${base.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, '$1[redacted]@')}${query}${fragment}`;
 }
 
 function verifyCreatedRule(retrieved, expectedScope, expectedRule) {
@@ -2431,6 +2567,10 @@ export {
   canonicalJson,
   sha256,
   redactSecrets,
+  redactUrl,
+  describeComponentPositions,
+  AUTH_PLACEHOLDER,
+  parseHttpUrl,
   walkComponents,
   failure,
   safeStringify,

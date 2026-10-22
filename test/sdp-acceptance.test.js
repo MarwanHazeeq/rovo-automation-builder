@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildRulePayload, createJiraAutomationRule } from '../src/index.js';
+import { findWebResponseReads } from '../src/draft-render.js';
 
 // Acceptance test for issue #7: the ruleSpec the agent should produce from
 // docs/specs/sdp-request-creation.md. Every secret is a placeholder string
@@ -50,7 +51,7 @@ const SPEC = {
     {
       type: 'jira.issue.outgoing.webhook',
       value: {
-        url: 'https://<TOKEN_HOST>/oauth/v2/token',
+        url: 'https://token-host.invalid/oauth/v2/token',
         method: 'POST',
         headers: [{ id: '_header_1', name: 'Content-Type', value: 'application/x-www-form-urlencoded', headerSecure: false }],
         contentType: 'custom',
@@ -74,7 +75,7 @@ const SPEC = {
     {
       type: 'jira.issue.outgoing.webhook',
       value: {
-        url: 'https://<SDP_HOST>/api/v3/requests',
+        url: 'https://sdp-host.invalid/api/v3/requests',
         method: 'POST',
         headers: [
           { id: '_header_2', name: 'Content-Type', value: 'application/x-www-form-urlencoded', headerSecure: false },
@@ -107,7 +108,7 @@ const SPEC = {
             {
               type: 'jira.issue.outgoing.webhook',
               value: {
-                url: 'https://<SYNC_SERVICE_URL>',
+                url: 'https://sync-service.invalid/sync',
                 method: 'POST',
                 headers: [
                   { id: '_header_4', name: 'Content-Type', value: 'application/json', headerSecure: false },
@@ -190,9 +191,9 @@ test('the comments/attachments check is nested inside the accepted block, after 
   for (const a of inner.children) assert.equal(a.parentId, inner.id);
 });
 
-test('placeholder credentials survive verbatim in the built payload', () => {
+test('stand-in credentials and URLs survive verbatim in the built payload', () => {
   const text = JSON.stringify(build().rule);
-  for (const placeholder of ['<SDP_CLIENT_ID>', '<SDP_CLIENT_SECRET>', '<SYNC_AUTH_KEY>', '<TOKEN_HOST>', '<SDP_HOST>', '<SYNC_SERVICE_URL>']) {
+  for (const placeholder of ['<SDP_CLIENT_ID>', '<SDP_CLIENT_SECRET>', '<SYNC_AUTH_KEY>', 'token-host.invalid', 'sdp-host.invalid', 'sync-service.invalid']) {
     assert.ok(text.includes(placeholder), `${placeholder} missing`);
   }
 });
@@ -263,4 +264,50 @@ test('verification fails when the GET has lost a trigger condition', async () =>
   const result = await createWithGet((rule) => { rule.trigger.conditions.pop(); });
   assert.equal(result.ok, false);
   assert.match(JSON.stringify(result), /Retrieved trigger conditions did not match/);
+});
+
+// Issue #13: every read is shown under the request whose response it gets.
+// The rejected branch never runs after the accepted branch's sync request, so
+// its reads belong to the SDP request, not to the request printed above them.
+test('the SDP rule\'s web-response reads all appear, with positions, under the right request', () => {
+  const { hasWebRequest, groups } = findWebResponseReads(build().rule);
+  assert.equal(hasWebRequest, true);
+  assert.deepEqual(groups, [
+    {
+      request: 'the 1st web request action',
+      reads: [{ accessor: '{{webResponse.body.access_token}}', where: ['the 3rd create variable action'] }],
+    },
+    {
+      request: 'the 2nd web request action',
+      reads: [
+        {
+          accessor: '{{webhookResponse.status}}',
+          where: [
+            'the 2nd compare condition (inside the 1st if-block)',
+            'the 3rd compare condition (inside the 1st if-block)',
+            'the 7th compare condition (inside the 3rd if-block)',
+          ],
+        },
+        {
+          accessor: '{{webhookResponse.body.request.id}}',
+          where: ['the 1st edit issue action (inside the 1st if-block)', 'the 3rd web request action (inside the 2nd if-block)'],
+        },
+        { accessor: '{{webResponse.body}}', where: ['the 2nd comment action (inside the 3rd if-block)'] },
+      ],
+    },
+    {
+      request: 'the 3rd web request action (inside the 2nd if-block)',
+      reads: [{ accessor: '{{webResponse.body}}', where: ['the 1st comment action (inside the 2nd if-block)'] }],
+    },
+  ]);
+});
+
+test('a read after an if/else group that sent a request says the response depends on the branch', () => {
+  const webhook = { component: 'ACTION', type: 'jira.issue.outgoing.webhook', value: { url: 'https://a.example.com' }, conditions: [], children: [] };
+  const read = { component: 'ACTION', type: 'jira.issue.comment', value: { comment: '{{webResponse.status}}' }, conditions: [], children: [] };
+  const ifBlock = { component: 'CONDITION_BLOCK', type: 'jira.condition.if.block', value: {}, conditions: [], children: [webhook] };
+  const group = { component: 'CONDITION', type: 'jira.condition.container.block', value: {}, conditions: [], children: [ifBlock] };
+  const { groups } = findWebResponseReads({ trigger: {}, components: [group, read] });
+  assert.equal(groups.at(-1).request, 'whichever request ran last in the 1st if/else group (it depends on the branch taken)');
+  assert.deepEqual(groups.at(-1).reads, [{ accessor: '{{webResponse.status}}', where: ['the 1st comment action'] }]);
 });

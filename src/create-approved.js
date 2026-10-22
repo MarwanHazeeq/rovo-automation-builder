@@ -2,7 +2,9 @@ import { createAndVerifyRule } from './index.js';
 import { resolveApprovalConfig } from './approval-config.js';
 import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
-import { renderAttentionComment, renderCreatedComment, renderNotCreatedComment } from './draft-render.js';
+import {
+  explainCreateFailure, renderAttentionComment, renderCreatedComment, renderNotCreatedComment, summarizeCreateFailure,
+} from './draft-render.js';
 
 /**
  * Rovo action `create-approved-automation-rule`. THE ONLY CODE PATH THAT
@@ -149,7 +151,7 @@ export function createApprovedRuleActions({
       } catch (error) {
         // createAndVerifyRule reports failures as values; a throw here means
         // the outcome is genuinely unknown.
-        result = { ok: false, error: error.message, summary: `Creation outcome unknown: ${error.message}` };
+        result = { ok: false, outcomeUnknown: true, error: `The create call threw: ${error.message}` };
       }
 
       if (result.ok) {
@@ -177,14 +179,19 @@ export function createApprovedRuleActions({
       }
 
       // createAndVerifyRule includes ruleUuid only when the rule DOES exist
-      // (created but not verified); say so plainly in that case.
-      const summary = result.summary ?? result.error;
+      // (created but not verified); say so plainly in that case. The
+      // explanation names the failing fields and the next step, and the same
+      // words go on the ticket, in storage and back to the agent.
+      const explanation = explainCreateFailure(result, creating.rule);
+      const summary = summarizeCreateFailure(explanation);
       await saveQuietly(
         () => store.applyEvent(creating, 'fail', { lastError: summary, ruleUuid: result.ruleUuid }),
         issueKey
       );
-      const ruleExists = typeof result.ruleUuid === 'string';
-      await comment(jira, issueKey, ruleExists ? renderAttentionComment(summary) : renderNotCreatedComment(summary));
+      const ruleExists = explanation.ruleExists;
+      await comment(jira, issueKey, ruleExists || explanation.outcomeUnknown
+        ? renderAttentionComment(explanation)
+        : renderNotCreatedComment(explanation));
       return {
         ok: false,
         // A rule that exists but failed verification IS created; say so, and
