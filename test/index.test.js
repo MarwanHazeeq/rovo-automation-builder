@@ -654,3 +654,79 @@ test('still rejects a system field that has no verified condition shape', async 
   assert.match(result.error, /jira\.comparator\.condition/);
   assert.match(result.error, /\{\{issue\.labels\}\}/);
 });
+
+// Issue #17: a synthetic stand-in for the GSOC-Demo spec. The broken copy has
+// sendNotifications inside fields with one brace missing, as the agent emitted it.
+const EDIT_FORMULA = '{{#=}}ROUND({{issue.customfield_11594|0}} + 1, 2){{/}}';
+const BROKEN_EDIT = `{"type":"jira.issue.edit","value":{"fields":{"Time Taken at Open Phase":"${EDIT_FORMULA}","sendNotifications":false}}`;
+const FIXED_EDIT = `{"type":"jira.issue.edit","value":{"fields":{"Time Taken at Open Phase":"${EDIT_FORMULA}"},"sendNotifications":false}}`;
+const specWith = (edit) =>
+  `{"name":"Accumulate phase time","projectId":"10449","trigger":{"type":"jira.issue.event.trigger:created"},` +
+  `"actions":[${edit},${edit}]}`;
+
+test('a ruleSpec with a missing brace is rejected with an excerpt, not a bare offset', async () => {
+  const result = await withForgeEnvironment(async () => {
+    throw new Error('no network call expected');
+  }, () => createJiraAutomationRule({ ruleSpec: specWith(BROKEN_EDIT) }));
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^ruleSpec is not valid JSON \(Expected double-quoted property name\)/);
+  assert.match(result.error, /"sendNotifications":false\}\},>>>HERE<<<\{"type"/);
+  assert.doesNotMatch(result.error, /position \d+/);
+});
+
+test('the corrected ruleSpec builds, with sendNotifications beside fields', async () => {
+  let createdRule;
+  const result = await withForgeEnvironment(async (url, options = {}) => {
+    if (url.endsWith('/rest/api/3/field')) return mockResponse(200, FIELD_METADATA);
+    if (options.method === 'POST') {
+      createdRule = JSON.parse(options.body).rule;
+      return mockResponse(201, { ruleUuid: 'created-rule-id' });
+    }
+    return mockResponse(200, { rule: createdRule });
+  }, () => createJiraAutomationRule({ ruleSpec: specWith(FIXED_EDIT) }));
+
+  assert.equal(result.ok, true, result.error);
+  const edits = createdRule.components.filter((component) => component.type === 'jira.issue.edit');
+  assert.equal(edits.length, 2);
+  for (const edit of edits) assert.equal(edit.value.sendNotifications, false);
+});
+
+test('sendNotifications inside fields is named per action, before any network call', async () => {
+  let calls = 0;
+  const misplaced = { type: 'jira.issue.edit', value: { fields: { 'Time Taken at Open Phase': '1', sendNotifications: false } } };
+  const result = await withForgeEnvironment(async () => {
+    calls += 1;
+    throw new Error('no network call expected');
+  }, () => createJiraAutomationRule({
+    ruleSpec: JSON.stringify({
+      name: 'x',
+      projectId: '10449',
+      trigger: { type: 'jira.issue.event.trigger:created' },
+      actions: [misplaced],
+      branches: [{ conditions: [], actions: [], branches: [{ conditions: [], actions: [{ type: 'jira.issue.comment', value: {} }, misplaced] }] }],
+    }),
+  }));
+
+  assert.equal(result.ok, false);
+  assert.equal(calls, 0);
+  assert.match(result.error, /2 malformed jira\.issue\.edit action/);
+  assert.match(result.error, /actions\[0\] has sendNotifications inside value\.fields/);
+  assert.match(result.error, /branches\[0\]\.branches\[0\]\.actions\[1\] has sendNotifications inside value\.fields/);
+});
+
+test('an edit action without fields is named by its path', async () => {
+  const result = await withForgeEnvironment(async () => {
+    throw new Error('no network call expected');
+  }, () => createJiraAutomationRule({
+    ruleSpec: JSON.stringify({
+      name: 'x',
+      projectId: '10449',
+      trigger: { type: 'jira.issue.event.trigger:created' },
+      actions: [{ type: 'jira.issue.edit', value: { sendNotifications: false } }],
+    }),
+  }));
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /actions\[0\] has no value\.fields/);
+});

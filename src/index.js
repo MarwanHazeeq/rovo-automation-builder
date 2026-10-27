@@ -642,7 +642,7 @@ export async function prepareRule(payload) {
   try {
     parsed = JSON.parse(rawInput);
   } catch (error) {
-    return failure(`Input is not valid JSON: ${error.message}`);
+    return failure(describeJsonError(rawInput, error));
   }
 
   let requestBody;
@@ -661,6 +661,12 @@ export async function prepareRule(payload) {
   } else {
     // The small, LLM-friendly specification. The Rovo agent produces this when
     // the user describes a rule in prose instead of supplying JSON.
+    // Shape defects the agent is known to make are caught here, before any
+    // network call, with a message naming each action that needs fixing.
+    const editDefects = findEditActionDefects(parsed);
+    if (editDefects.length > 0) {
+      return failure(`ruleSpec has ${editDefects.length} malformed jira.issue.edit action(s): ${editDefects.join('; ')}.`);
+    }
     try {
       // A jira.issue.edit action or a jira.issue.condition condition both
       // need real tenant field metadata to resolve a field NAME into the
@@ -1804,6 +1810,58 @@ function collectSpecParts(spec) {
     for (const branch of spec.branches) parts.push(...collectSpecParts(branch));
   }
   return parts;
+}
+
+/**
+ * Turn a JSON.parse error into a message a person can act on. Node reports
+ * only a character offset ("position 841"), which means nothing to a
+ * requester, so the text around that offset is quoted with a marker at the
+ * exact spot the parser gave up.
+ */
+function describeJsonError(text, error) {
+  const match = /position (\d+)/.exec(error.message);
+  if (!match) return `ruleSpec is not valid JSON: ${error.message}`;
+  const position = Number(match[1]);
+  const start = Math.max(0, position - 40);
+  const end = Math.min(text.length, position + 40);
+  const excerpt =
+    (start > 0 ? '...' : '') +
+    text.slice(start, position) + '>>>HERE<<<' + text.slice(position, end) +
+    (end < text.length ? '...' : '');
+  // Keep only the parser's reason, e.g. "Expected double-quoted property name".
+  const reason = error.message.replace(/\s*in JSON at position.*$/s, '');
+  return `ruleSpec is not valid JSON (${reason}). The problem is at >>>HERE<<< in: ${excerpt}`;
+}
+
+/**
+ * List the jira.issue.edit actions whose `value` has the wrong shape, each
+ * named by its path (e.g. "branches[1].actions[3]") so the agent can fix them
+ * all in one revision. Walks setup actions and every branch, nested ones too.
+ *
+ * The defect this exists for: the agent putting `sendNotifications` INSIDE
+ * `value.fields`, where it would otherwise be looked up as a Jira field name.
+ */
+function findEditActionDefects(spec, path = '') {
+  if (!spec || typeof spec !== 'object') return [];
+  const defects = [];
+  const actions = Array.isArray(spec.actions) ? spec.actions : [];
+  actions.forEach((action, index) => {
+    if (action?.type !== 'jira.issue.edit') return;
+    const where = `${path}actions[${index}]`;
+    const fields = action.value?.fields;
+    const entries = normalizeEditFields(fields);
+    if (!entries || entries.length === 0) {
+      defects.push(`${where} has no value.fields`);
+    } else if (entries.some((entry) => entry?.name === 'sendNotifications')) {
+      defects.push(`${where} has sendNotifications inside value.fields; it belongs beside fields, in value`);
+    }
+  });
+  if (Array.isArray(spec.branches)) {
+    spec.branches.forEach((branch, index) => {
+      defects.push(...findEditActionDefects(branch, `${path}branches[${index}].`));
+    });
+  }
+  return defects;
 }
 
 /**
