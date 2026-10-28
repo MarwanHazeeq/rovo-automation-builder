@@ -82,34 +82,34 @@ const TRIGGER_LIBRARY = {
 
   'jira.issue.event.trigger:transitioned': {
     schemaVersion: 1,
-    description: 'Run when a work item moves between statuses. Filter on the status inside the rule.',
-    source: 'Status-Phase-Calc.txt + TimeTakeninStatus-Changelog.json (both fire on EVERY transition)',
-    example: {},
+    description: 'Run when a work item moves between statuses, optionally only from or to named statuses.',
+    source:
+      'Live site rules "Jira-ITHUB Close" and "Approved_Automation" (status filters, found with ' +
+      'scripts/find-component-examples.js); Status-Phase-Calc.txt (no filter)',
+    example: { toStatus: ['Closed'] },
     builtInternally: {
       description:
-        'NOT something to send. The builder produces this value; eventFilters, eventKey and issueEvent are never supplied.',
+        'NOT something to send. The builder produces this value; eventFilters, eventKey, issueEvent and the { type, value } status wrappers are never supplied.',
       value: {
         eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
         fromStatus: [],
-        toStatus: [],
+        toStatus: [{ type: 'NAME', value: 'Closed' }],
         eventKey: 'jira:issue_updated',
         issueEvent: 'issue_generic',
       },
     },
     notes:
-      'The trigger takes no settings: send just { "type": "jira.issue.event.trigger:transitioned" }. ' +
-      'It fires on EVERY transition in the scoped project. ' +
-      'DO NOT send fromStatus or toStatus: the builder rejects them, as NOT YET SUPPORTED. ' +
-      'Jira\'s Automation UI does filter a transition trigger by status, so a valid value form ' +
-      'exists; this app has not captured it. Sending plain status names produced HTTP 500 with ' +
-      'an empty body, and no rule export on this tenant has either array populated -- an empty ' +
-      'array shows the field exists, not what goes in it. Capturing the real form needs one rule ' +
-      'built in the Automation UI with a status filter, then exported (HOW TO ADD A NEW TYPE, ' +
-      'top of this file). ' +
-      'Filter on the status INSIDE the rule instead, which every working rule on this tenant does: ' +
-      'a jira.comparator.condition on {{changelog.status.fromString}} (the status just left) or ' +
-      '{{changelog.status.toString}} (the status just entered). One condition per branch gives ' +
-      'per-status behaviour; a single top-level condition restricts the whole rule.',
+      'fromStatus (the status left) and toStatus (the status entered) are optional LISTS of plain ' +
+      'status names, e.g. { "type": "jira.issue.event.trigger:transitioned", "toStatus": ["Closed"] }. ' +
+      'Leave both out and the rule fires on EVERY transition in the scoped project. ' +
+      'Send a list even for one status: a single string is refused. Send names only; the builder ' +
+      'wraps each as { "type": "NAME", "value": ... }, and pre-wrapped objects are refused. ' +
+      'Names must match the project\'s status names exactly, case included: the app checks them ' +
+      'against the project\'s workflow and refuses the draft with the real names listed, so resend ' +
+      'the spec with a name from that list. ' +
+      'For different behaviour per status, filter INSIDE the rule instead: a ' +
+      'jira.comparator.condition per branch on {{changelog.status.fromString}} (the status just ' +
+      'left) or {{changelog.status.toString}} (the status just entered).',
   },
 
   'jira.issue.field.changed': {

@@ -12,6 +12,8 @@ Drafting a new rule:
 1. Call get-component-reference first (no arguments for the index, then the
    specific types you need). Use only shapes it returns. If a type is not
    listed, tell the user it is not supported yet instead of guessing.
+   Design the rule from the request and those shapes. You do not need an
+   existing rule or an earlier approval ticket that does the same thing.
    Copy each component's shape from get-component-reference exactly. Put only
    the keys listed there inside "value"; never repeat "type" inside "value".
    If draft-automation-rule fails with a shape error, re-read the reference for

@@ -140,3 +140,19 @@ test('the structural reference carries the worked example and the setup/nesting 
   assert.equal(spec.branches.length, 2);
   assert.ok(spec.branches[0].branches.length > 0);
 });
+
+test('no response names where a shape came from, so the agent does not go looking for it', async () => {
+  const index = await getComponentReference();
+  const responses = [await getComponentReference({ smartValues: true })];
+  for (const kind of Object.keys(index.kinds)) responses.push(await getComponentReference({ kind }));
+  for (const response of responses) {
+    assert.doesNotMatch(JSON.stringify(response), /"source":"/);
+  }
+  assert.match(index.usageNotes.join(' '), /do not need an existing rule/);
+});
+
+test('a source key that is part of a real Jira shape is kept', async () => {
+  const result = await getComponentReference({ componentType: 'jira.issue.condition' });
+  assert.equal(result.builtInternally.shapes.systemField.value.compareValue.source, null);
+  assert.equal('source' in result.builtInternally.shapes.systemField, false);
+});

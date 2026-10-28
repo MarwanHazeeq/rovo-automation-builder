@@ -451,3 +451,111 @@ test('a revised draft carries the web-response section too', async () => {
   await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
   assert.match(adfText(ctx.jira.calls.addComment[0].body), /Web response reads/);
 });
+
+// --- status names on the transitioned trigger -------------------------------
+
+// The target project's workflow, as GET /project/{id}/statuses returns it.
+const TARGET_STATUSES = [
+  { id: '1', name: 'Incident', statuses: [{ id: '11', name: 'Open' }, { id: '12', name: 'Closed' }] },
+  { id: '2', name: 'Task', statuses: [{ id: '11', name: 'Open' }, { id: '13', name: 'In Triage' }] },
+];
+
+// Approval config reads AUTOAPR's workflow; the target project 10449 gets its own.
+const statusesByProject = (key) => (key === '10449' ? TARGET_STATUSES : PROJECT_STATUSES);
+
+/** A prepare() stub whose rule is a transitioned trigger with these filters. */
+function preparedTransition({ fromStatus = [], toStatus = [] } = {}) {
+  return async () => {
+    const { rule, scope, cloudId, projectName } = await preparedOk()();
+    const wrap = (names) => names.map((value) => ({ type: 'NAME', value }));
+    rule.trigger = {
+      component: 'TRIGGER',
+      type: 'jira.issue.event.trigger:transitioned',
+      value: {
+        eventFilters: [scope], fromStatus: wrap(fromStatus), toStatus: wrap(toStatus),
+        eventKey: 'jira:issue_updated', issueEvent: 'issue_generic',
+      },
+    };
+    return { ok: true, rule, scope, cloudId, projectName };
+  };
+}
+
+test('a status name the target project does not have is refused before any ticket is raised', async () => {
+  const { jira, actions } = setup({
+    jiraOverrides: { getProjectStatuses: statusesByProject },
+    prepare: preparedTransition({ toStatus: ['closed'] }),
+  });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /trigger\.toStatus/);
+  assert.match(result.error, /"closed"/);
+  assert.match(result.error, /did you mean "Closed"/);
+  assert.equal(jira.calls.createIssue.length, 0);
+});
+
+test('an unknown status name lists the project statuses, each once', async () => {
+  const { actions } = setup({
+    jiraOverrides: { getProjectStatuses: statusesByProject },
+    prepare: preparedTransition({ fromStatus: ['Open', 'Investigation'] }),
+  });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /trigger\.fromStatus/);
+  assert.match(result.error, /"Investigation"/);
+  assert.match(result.error, /"Open", "Closed", "In Triage"/);
+  assert.doesNotMatch(result.error, /"Open".*"Open"/);
+});
+
+test('exact status names pass, checked against the target project', async () => {
+  const { jira, actions } = setup({
+    jiraOverrides: { getProjectStatuses: statusesByProject },
+    prepare: preparedTransition({ fromStatus: ['In Triage'], toStatus: ['Closed'] }),
+  });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.equal(result.ok, true);
+  assert.ok(jira.calls.getProjectStatuses.includes('10449'));
+});
+
+test('a rule with no status filter does not read the target workflow', async () => {
+  const { jira, actions } = setup({ prepare: preparedTransition() });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.equal(result.ok, true);
+  assert.ok(!jira.calls.getProjectStatuses.includes('10449'));
+});
+
+test('a failed read of the target workflow raises no ticket', async () => {
+  const { jira, actions } = setup({
+    jiraOverrides: {
+      getProjectStatuses: (key) => {
+        if (key === '10449') throw new Error('HTTP 403');
+        return PROJECT_STATUSES;
+      },
+    },
+    prepare: preparedTransition({ toStatus: ['Closed'] }),
+  });
+  const result = await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /statuses of project 10449 could not be read: HTTP 403/);
+  assert.equal(jira.calls.createIssue.length, 0);
+});
+
+test('a revision with an unknown status name is refused and the stored draft is unchanged', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus, {
+    jiraOverrides: { getProjectStatuses: statusesByProject },
+  });
+  const before = await ctx.store.getDraft('20001');
+  const revise = createDraftActions({
+    jira: ctx.jira, store: ctx.store, prepare: preparedTransition({ toStatus: ['Done'] }), getEnv: () => APPROVAL_ENV,
+  });
+  const result = await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /"Done"/);
+  assert.deepEqual(await ctx.store.getDraft('20001'), before);
+  assert.equal(ctx.jira.calls.transitionIssue.length, 0);
+});

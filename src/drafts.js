@@ -59,12 +59,14 @@ export function createDraftActions({
       if (!configResult.ok) return draftFailure(configResult.error);
       const { config } = configResult;
 
-      // 1. Build and validate. Nothing is created; the only network call is
-      //    the read-only field-metadata lookup.
+      // 1. Build and validate. Nothing is created; the only network calls are
+      //    read-only lookups (fields, project, and the trigger's statuses).
       const prepared = await prepare({ ...payload, requestText });
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared });
       const projectId = projectIdFromScope(prepared.scope);
       const projectName = prepared.projectName ?? null;
+      const statusCheck = await checkStatusNames(jira, prepared.rule, projectId);
+      if (!statusCheck.ok) return draftFailure(statusCheck.error);
 
       // 2. Raise the approval ticket AS THE USER, so they are the reporter.
       let issue;
@@ -187,6 +189,8 @@ export function createDraftActions({
 
       const prepared = await prepare({ ...payload, requestText: existing.requestText });
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared, issueKey });
+      const statusCheck = await checkStatusNames(jira, prepared.rule, projectIdFromScope(prepared.scope));
+      if (!statusCheck.ok) return draftFailure(statusCheck.error, { issueKey });
 
       const rule = withTicketPrefix(prepared.rule, issue.key);
       const version = existing.version + 1;
@@ -254,6 +258,60 @@ function draftFailure(message, extra = {}) {
     error: message,
     summary: `No automation rule was created. ${message}`,
     ...safeExtra,
+  };
+}
+
+// How many status names a refusal lists. The agent picks from them, so a
+// short list of real options helps more than a whole workflow dump.
+const STATUS_ERROR_CANDIDATE_LIMIT = 10;
+
+/**
+ * Check the status names on a transitioned trigger against the target
+ * project's workflow. Jira accepts any name at create time, and a name that
+ * matches no status makes a rule that never fires, with no error anywhere.
+ * So an unknown name is refused here, before a ticket is raised, naming the
+ * real statuses so the agent can resend the spec.
+ *
+ * Names must match exactly. A case-only difference is refused too, with the
+ * real name suggested: correcting it silently would freeze a draft that
+ * differs from the one the agent sent.
+ */
+async function checkStatusNames(jira, rule, projectId) {
+  const value = rule?.trigger?.value ?? {};
+  const wanted = ['fromStatus', 'toStatus'].flatMap((field) =>
+    (Array.isArray(value[field]) ? value[field] : []).map((ref) => ({ field, name: ref?.value }))
+  );
+  // No filter (or any other trigger): nothing to check, so no extra call.
+  if (wanted.length === 0) return { ok: true };
+
+  let issueTypes;
+  try {
+    issueTypes = await jira.getProjectStatuses(projectId);
+  } catch (error) {
+    return { ok: false, error: `The statuses of project ${projectId} could not be read: ${error.message}` };
+  }
+  // The same status shows up under every issue type that uses it; list it once.
+  const known = [...new Set(
+    (Array.isArray(issueTypes) ? issueTypes : []).flatMap((type) =>
+      (Array.isArray(type?.statuses) ? type.statuses : []).map((status) => status?.name)
+    ).filter((name) => typeof name === 'string')
+  )];
+
+  const problems = wanted
+    .filter(({ name }) => !known.includes(name))
+    .map(({ field, name }) => {
+      const nearMatch = known.find((candidate) => candidate.toLowerCase() === String(name).toLowerCase());
+      return `trigger.${field} has "${name}"${nearMatch ? ` (did you mean "${nearMatch}"?)` : ''}`;
+    });
+  if (problems.length === 0) return { ok: true };
+
+  const listed = known.slice(0, STATUS_ERROR_CANDIDATE_LIMIT).map((name) => `"${name}"`).join(', ');
+  const more = known.length > STATUS_ERROR_CANDIDATE_LIMIT ? `, and ${known.length - STATUS_ERROR_CANDIDATE_LIMIT} more` : '';
+  return {
+    ok: false,
+    error:
+      `${problems.join('; ')}, but project ${projectId} has no status with that exact name. ` +
+      `Its statuses are: ${listed}${more}. Send the names exactly as listed.`,
   };
 }
 

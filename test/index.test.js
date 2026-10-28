@@ -731,10 +731,11 @@ test('an edit action without fields is named by its path', async () => {
   assert.match(result.error, /actions\[0\] has no value\.fields/);
 });
 
-// --- transitioned trigger: status filters are refused -----------------------
-// The Automation API answers HTTP 500 with an EMPTY body when fromStatus holds
-// status names, so there is no error text to relay to the agent. The builder
-// refuses the filter up front and names the replacement instead.
+// --- transitioned trigger: status filters -----------------------------------
+// The agent sends plain status names; the builder wraps each as
+// { type: 'NAME', value }, the form every status-filtered rule on the site
+// uses. Plain strings sent to the Automation API get HTTP 500 with an EMPTY
+// body, so anything that is not a list of names is refused at draft time.
 
 async function buildTransitionRule(triggerExtras) {
   let createdRule;
@@ -756,22 +757,41 @@ async function buildTransitionRule(triggerExtras) {
   return { result, createdRule };
 }
 
-test('a populated fromStatus is refused and the replacement is named', async () => {
-  const { result } = await buildTransitionRule({ fromStatus: ['Open', 'In Triage'] });
+test('fromStatus names are trimmed and wrapped as NAME status references', async () => {
+  const { result, createdRule } = await buildTransitionRule({ fromStatus: ['Open', ' In Triage '] });
 
-  assert.equal(result.ok, false);
-  assert.match(result.error, /trigger\.fromStatus is not supported/);
-  assert.match(result.error, /changelog\.status\.fromString/);
-  // The rejected value is echoed so the agent can see what it sent.
-  assert.match(result.error, /In Triage/);
+  assert.equal(result.ok, true);
+  assert.deepEqual(createdRule.trigger.value.fromStatus, [
+    { type: 'NAME', value: 'Open' },
+    { type: 'NAME', value: 'In Triage' },
+  ]);
+  assert.deepEqual(createdRule.trigger.value.toStatus, []);
 });
 
-test('a populated toStatus nested in value is refused and names toString', async () => {
-  const { result } = await buildTransitionRule({ value: { toStatus: ['Closed'] } });
+test('a toStatus nested in value is wrapped the same way', async () => {
+  const { result, createdRule } = await buildTransitionRule({ value: { toStatus: ['Closed'] } });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(createdRule.trigger.value.toStatus, [{ type: 'NAME', value: 'Closed' }]);
+});
+
+// Regression: a single string used to be dropped silently, so the rule fired
+// on EVERY transition while the draft the approver read named one status.
+test('a single status string is refused, not dropped', async () => {
+  const { result, createdRule } = await buildTransitionRule({ toStatus: 'Closed' });
 
   assert.equal(result.ok, false);
-  assert.match(result.error, /trigger\.toStatus is not supported/);
-  assert.match(result.error, /changelog\.status\.toString/);
+  assert.equal(createdRule, undefined);
+  assert.match(result.error, /trigger\.toStatus must be a list of status names/);
+  // The rejected value is echoed so the agent can see what it sent.
+  assert.match(result.error, /"Closed"/);
+});
+
+test('pre-wrapped status objects are refused, so there is one input form', async () => {
+  const { result } = await buildTransitionRule({ fromStatus: [{ type: 'NAME', value: 'Open' }] });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /trigger\.fromStatus\[0\]/);
 });
 
 test('a transitioned trigger with no status filter builds with both arrays empty', async () => {
