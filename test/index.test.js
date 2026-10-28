@@ -730,3 +730,54 @@ test('an edit action without fields is named by its path', async () => {
   assert.equal(result.ok, false);
   assert.match(result.error, /actions\[0\] has no value\.fields/);
 });
+
+// --- transitioned trigger: status filters are refused -----------------------
+// The Automation API answers HTTP 500 with an EMPTY body when fromStatus holds
+// status names, so there is no error text to relay to the agent. The builder
+// refuses the filter up front and names the replacement instead.
+
+async function buildTransitionRule(triggerExtras) {
+  let createdRule;
+  const result = await withForgeEnvironment(async (url, options = {}) => {
+    if (url.endsWith('/rest/api/3/field')) return mockResponse(200, FIELD_METADATA);
+    if (options.method === 'POST') {
+      createdRule = JSON.parse(options.body).rule;
+      return mockResponse(201, { ruleUuid: 'created-rule-id' });
+    }
+    return mockResponse(200, { rule: createdRule });
+  }, () => createJiraAutomationRule({
+    ruleSpec: JSON.stringify({
+      name: 'Transition rule',
+      projectId: '10449',
+      trigger: { type: 'jira.issue.event.trigger:transitioned', ...triggerExtras },
+      actions: [{ type: 'codebarrel.action.log', value: 'moved' }],
+    }),
+  }));
+  return { result, createdRule };
+}
+
+test('a populated fromStatus is refused and the replacement is named', async () => {
+  const { result } = await buildTransitionRule({ fromStatus: ['Open', 'In Triage'] });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /trigger\.fromStatus is not supported/);
+  assert.match(result.error, /changelog\.status\.fromString/);
+  // The rejected value is echoed so the agent can see what it sent.
+  assert.match(result.error, /In Triage/);
+});
+
+test('a populated toStatus nested in value is refused and names toString', async () => {
+  const { result } = await buildTransitionRule({ value: { toStatus: ['Closed'] } });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /trigger\.toStatus is not supported/);
+  assert.match(result.error, /changelog\.status\.toString/);
+});
+
+test('a transitioned trigger with no status filter builds with both arrays empty', async () => {
+  const { result, createdRule } = await buildTransitionRule({});
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(createdRule.trigger.value.fromStatus, []);
+  assert.deepEqual(createdRule.trigger.value.toStatus, []);
+});
