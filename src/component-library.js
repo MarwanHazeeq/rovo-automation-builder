@@ -99,10 +99,13 @@ const TRIGGER_LIBRARY = {
     notes:
       'The trigger takes no settings: send just { "type": "jira.issue.event.trigger:transitioned" }. ' +
       'It fires on EVERY transition in the scoped project. ' +
-      'DO NOT send fromStatus or toStatus: the builder rejects them. The value form Jira expects ' +
-      'inside those arrays is UNVERIFIED -- no rule export on this tenant has either array ' +
-      'populated, and sending status names produced an HTTP 500 with an empty body from the ' +
-      'Automation API (both arrays are empty in every rule that works). ' +
+      'DO NOT send fromStatus or toStatus: the builder rejects them, as NOT YET SUPPORTED. ' +
+      'Jira\'s Automation UI does filter a transition trigger by status, so a valid value form ' +
+      'exists; this app has not captured it. Sending plain status names produced HTTP 500 with ' +
+      'an empty body, and no rule export on this tenant has either array populated -- an empty ' +
+      'array shows the field exists, not what goes in it. Capturing the real form needs one rule ' +
+      'built in the Automation UI with a status filter, then exported (HOW TO ADD A NEW TYPE, ' +
+      'top of this file). ' +
       'Filter on the status INSIDE the rule instead, which every working rule on this tenant does: ' +
       'a jira.comparator.condition on {{changelog.status.fromString}} (the status just left) or ' +
       '{{changelog.status.toString}} (the status just entered). One condition per branch gives ' +

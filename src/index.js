@@ -59,28 +59,36 @@ const TRIGGER_BUILDERS = {
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
 
       // These two arrays are REFUSED when populated, and sent empty otherwise.
+      // This is a NOT-YET-SUPPORTED limit, not a statement about the API.
       //
-      // The value form Jira wants inside them is unverified. The library used
-      // to document status NAMES, but that shape was never captured from a
-      // real rule -- its `source` named this builder, not an export. Sending
-      // names makes the Automation API answer HTTP 500 with an EMPTY body, so
-      // there is no error text to pass back to the agent and nothing on the
-      // approval ticket to act on. Every transition rule that works on this
-      // tenant has both arrays empty and filters on the status inside the rule
-      // instead.
+      // Jira's own Automation UI filters a transition trigger by status, so a
+      // valid value form plainly exists. What is established here is narrower:
+      // the form THIS BUILDER sent -- plain status name strings -- makes the
+      // Automation API answer HTTP 500 with an EMPTY body. Empty arrays and an
+      // otherwise identical payload returned 201.
       //
-      // Refusing is deliberate. Quietly emptying a populated filter would
-      // produce a rule that fires on EVERY transition while the draft the
+      // The name shape was never evidence. The library entry's `source` named
+      // this builder rather than a rule export, and no export on the tenant has
+      // either array populated: an empty array shows the field exists, not what
+      // goes in it. Capturing the real form needs one rule built in the
+      // Automation UI with a status filter, then exported -- step 1 of HOW TO
+      // ADD A NEW TYPE in src/component-library.js. Once captured, this refusal
+      // is replaced by support.
+      //
+      // Refusing meanwhile is deliberate. Quietly emptying a populated filter
+      // would produce a rule that fires on EVERY transition while the draft the
       // approver reads says otherwise -- the silent-drop bug this builder
-      // already had once. A refusal names the replacement, so the agent can
+      // already had once. A refusal names the workaround, so the agent can
       // redraft in one pass.
       for (const [field, value] of [['fromStatus', fromStatus], ['toStatus', toStatus]]) {
         if (Array.isArray(value) && value.length > 0) {
           throw new Error(
-            `trigger.${field} is not supported: the Automation API rejects a populated ` +
-              `${field} (HTTP 500, empty body) and the value form it expects is unverified. ` +
-              `Remove ${field} from the trigger and filter on the status inside the rule ` +
-              'instead, with a jira.comparator.condition comparing ' +
+            `trigger.${field} is not supported yet: this app sends plain status names, and the ` +
+              'Automation API answers HTTP 500 with an empty body to that form. Jira\'s UI does ' +
+              `filter by status, so a valid form exists -- it has not been captured from a real ` +
+              'rule export yet. Until it is, remove ' +
+              `${field} from the trigger and filter on the status inside the rule instead, with a ` +
+              'jira.comparator.condition comparing ' +
               `"{{changelog.status.${field === 'fromStatus' ? 'fromString' : 'toString'}}}" ` +
               `against each status (received: ${JSON.stringify(value)}).`
           );
