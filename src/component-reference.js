@@ -23,6 +23,9 @@ const KINDS = Object.keys(LIBRARIES);
 // Returned with every index response. The agent cannot read these constraints
 // off a value shape, and each one is a rule it would otherwise break.
 const USAGE_NOTES = [
+  'Design the rule from the request and the shapes here. You do not need an existing rule, or an ' +
+    'earlier approval ticket, that does the same thing: combine these components into whatever the ' +
+    'request needs.',
   'These are component `value` OBJECT shapes. The smart-value expressions that go inside a ' +
     'value -- a log message, a variable query, a field value -- are free text and are not ' +
     'described here. Do not refuse to use a smart value because it is absent from this reference.',
@@ -49,6 +52,21 @@ function isVerified(entry) {
   return !(entry && entry.example === null && entry.unverifiedGuess);
 }
 
+// `source` (which rule export a shape came from) is for maintainers. Served
+// to the agent, it reads as a lead: it searched the site for a cited rule and
+// read an old approval ticket instead of designing from the request.
+// Only STRING sources are provenance: some real Jira shapes have their own
+// `source` key (jira.issue.condition's compareValue.source: null), kept as is.
+function withoutSources(value) {
+  if (Array.isArray(value)) return value.map(withoutSources);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, inner]) => !(key === 'source' && typeof inner === 'string'))
+      .map(([key, inner]) => [key, withoutSources(inner)])
+  );
+}
+
 function summarise(type, entry) {
   return {
     type,
@@ -64,7 +82,6 @@ function detail(kind, type, entry) {
     schemaVersion: entry.schemaVersion,
     description: entry.description,
     verified: isVerified(entry),
-    source: entry.source,
   };
   for (const key of [
     'example',
@@ -74,7 +91,7 @@ function detail(kind, type, entry) {
     'verifiedMatchTypes',
     'notes',
   ]) {
-    if (entry[key] !== undefined) out[key] = entry[key];
+    if (entry[key] !== undefined) out[key] = withoutSources(entry[key]);
   }
   if (!out.verified) {
     out.unverifiedGuess = entry.unverifiedGuess;
@@ -142,7 +159,7 @@ export async function getComponentReference(payload = {}) {
   }
 
   if (wantsSmartValues) {
-    return { ok: true, smartValues: VERIFIED_SMART_VALUES };
+    return { ok: true, smartValues: withoutSources(VERIFIED_SMART_VALUES) };
   }
 
   return {

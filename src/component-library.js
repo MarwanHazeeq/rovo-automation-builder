@@ -104,8 +104,9 @@ const TRIGGER_LIBRARY = {
       'Leave both out and the rule fires on EVERY transition in the scoped project. ' +
       'Send a list even for one status: a single string is refused. Send names only; the builder ' +
       'wraps each as { "type": "NAME", "value": ... }, and pre-wrapped objects are refused. ' +
-      'Names must match the workflow\'s status names exactly; the app does not check them, and a ' +
-      'misspelt name makes a rule that never fires. ' +
+      'Names must match the project\'s status names exactly, case included: the app checks them ' +
+      'against the project\'s workflow and refuses the draft with the real names listed, so resend ' +
+      'the spec with a name from that list. ' +
       'For different behaviour per status, filter INSIDE the rule instead: a ' +
       'jira.comparator.condition per branch on {{changelog.status.fromString}} (the status just ' +
       'left) or {{changelog.status.toString}} (the status just entered).',
