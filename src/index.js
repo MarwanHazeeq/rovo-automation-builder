@@ -58,47 +58,32 @@ const TRIGGER_BUILDERS = {
       const fromStatus = trigger.fromStatus ?? triggerValue.fromStatus;
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
 
-      // These two arrays are REFUSED when populated, and sent empty otherwise.
-      // This is a NOT-YET-SUPPORTED limit, not a statement about the API.
-      //
-      // Jira's own Automation UI filters a transition trigger by status, so a
-      // valid value form plainly exists. What is established here is narrower:
-      // the form THIS BUILDER sent -- plain status name strings -- makes the
-      // Automation API answer HTTP 500 with an EMPTY body. Empty arrays and an
-      // otherwise identical payload returned 201.
-      //
-      // The name shape was never evidence. The library entry's `source` named
-      // this builder rather than a rule export, and no export on the tenant has
-      // either array populated: an empty array shows the field exists, not what
-      // goes in it. Capturing the real form needs one rule built in the
-      // Automation UI with a status filter, then exported -- step 1 of HOW TO
-      // ADD A NEW TYPE in src/component-library.js. Once captured, this refusal
-      // is replaced by support.
-      //
-      // Refusing meanwhile is deliberate. Quietly emptying a populated filter
-      // would produce a rule that fires on EVERY transition while the draft the
-      // approver reads says otherwise -- the silent-drop bug this builder
-      // already had once. A refusal names the workaround, so the agent can
-      // redraft in one pass.
-      for (const [field, value] of [['fromStatus', fromStatus], ['toStatus', toStatus]]) {
-        if (Array.isArray(value) && value.length > 0) {
+      // The agent sends plain status names; Jira stores each one as
+      // { type: 'NAME', value }. That form is taken from the live site rules
+      // "Jira-ITHUB Close" and "Approved_Automation". Plain strings make the
+      // Automation API answer HTTP 500 with an EMPTY body, so they are never
+      // sent. Anything that is not a list of names -- a single string above
+      // all -- is refused rather than emptied: an emptied filter makes a rule
+      // that fires on EVERY transition while the draft the approver reads
+      // names one status.
+      const statusFilter = (value, field) => {
+        if (value === undefined || value === null) return [];
+        if (!Array.isArray(value)) {
           throw new Error(
-            `trigger.${field} is not supported yet: this app sends plain status names, and the ` +
-              'Automation API answers HTTP 500 with an empty body to that form. Jira\'s UI does ' +
-              `filter by status, so a valid form exists -- it has not been captured from a real ` +
-              'rule export yet. Until it is, remove ' +
-              `${field} from the trigger and filter on the status inside the rule instead, with a ` +
-              'jira.comparator.condition comparing ' +
-              `"{{changelog.status.${field === 'fromStatus' ? 'fromString' : 'toString'}}}" ` +
-              `against each status (received: ${JSON.stringify(value)}).`
+            `trigger.${field} must be a list of status names, e.g. ["Closed"] ` +
+              `(received: ${JSON.stringify(value)}).`
           );
         }
-      }
+        return value.map((name, index) => ({
+          type: 'NAME',
+          value: nonEmptyString(name, `trigger.${field}[${index}]`),
+        }));
+      };
 
       return {
         eventFilters: [scope],
-        fromStatus: [],
-        toStatus: [],
+        fromStatus: statusFilter(fromStatus, 'fromStatus'),
+        toStatus: statusFilter(toStatus, 'toStatus'),
         eventKey: 'jira:issue_updated',
         issueEvent: 'issue_generic',
       };
