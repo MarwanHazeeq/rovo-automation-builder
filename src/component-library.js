@@ -82,28 +82,31 @@ const TRIGGER_LIBRARY = {
 
   'jira.issue.event.trigger:transitioned': {
     schemaVersion: 1,
-    description: 'Run when a work item moves between statuses. Filterable by source and destination.',
-    source: 'index.js TRIGGER_BUILDERS',
-    example: {
-      fromStatus: ['Open'],
-      toStatus: [],
-    },
+    description: 'Run when a work item moves between statuses. Filter on the status inside the rule.',
+    source: 'Status-Phase-Calc.txt + TimeTakeninStatus-Changelog.json (both fire on EVERY transition)',
+    example: {},
     builtInternally: {
       description:
         'NOT something to send. The builder produces this value; eventFilters, eventKey and issueEvent are never supplied.',
       value: {
         eventFilters: ['ari:cloud:jira:<cloudId>:project/<numericProjectId>'],
-        fromStatus: ['Open'],
+        fromStatus: [],
         toStatus: [],
         eventKey: 'jira:issue_updated',
         issueEvent: 'issue_generic',
       },
     },
     notes:
-      'Supply fromStatus / toStatus as arrays of status NAMES on the trigger; an empty array means ' +
-      '"any". A fromStatus filter is the cheapest way to restrict a rule to one source status -- it ' +
-      'replaces a guard condition entirely. Inside the rule, the transition is readable as ' +
-      '{{changelog.status.fromString}} and {{changelog.status.toString}}.',
+      'The trigger takes no settings: send just { "type": "jira.issue.event.trigger:transitioned" }. ' +
+      'It fires on EVERY transition in the scoped project. ' +
+      'DO NOT send fromStatus or toStatus: the builder rejects them. The value form Jira expects ' +
+      'inside those arrays is UNVERIFIED -- no rule export on this tenant has either array ' +
+      'populated, and sending status names produced an HTTP 500 with an empty body from the ' +
+      'Automation API (both arrays are empty in every rule that works). ' +
+      'Filter on the status INSIDE the rule instead, which every working rule on this tenant does: ' +
+      'a jira.comparator.condition on {{changelog.status.fromString}} (the status just left) or ' +
+      '{{changelog.status.toString}} (the status just entered). One condition per branch gives ' +
+      'per-status behaviour; a single top-level condition restricts the whole rule.',
   },
 
   'jira.issue.field.changed': {

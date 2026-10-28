@@ -57,12 +57,40 @@ const TRIGGER_BUILDERS = {
       const triggerValue = trigger.value || {};
       const fromStatus = trigger.fromStatus ?? triggerValue.fromStatus;
       const toStatus = trigger.toStatus ?? triggerValue.toStatus;
-      // Optional: an empty list means "any status" (the library documents it),
-      // and "when a ticket changes status" with no statuses named is a real request.
+
+      // These two arrays are REFUSED when populated, and sent empty otherwise.
+      //
+      // The value form Jira wants inside them is unverified. The library used
+      // to document status NAMES, but that shape was never captured from a
+      // real rule -- its `source` named this builder, not an export. Sending
+      // names makes the Automation API answer HTTP 500 with an EMPTY body, so
+      // there is no error text to pass back to the agent and nothing on the
+      // approval ticket to act on. Every transition rule that works on this
+      // tenant has both arrays empty and filters on the status inside the rule
+      // instead.
+      //
+      // Refusing is deliberate. Quietly emptying a populated filter would
+      // produce a rule that fires on EVERY transition while the draft the
+      // approver reads says otherwise -- the silent-drop bug this builder
+      // already had once. A refusal names the replacement, so the agent can
+      // redraft in one pass.
+      for (const [field, value] of [['fromStatus', fromStatus], ['toStatus', toStatus]]) {
+        if (Array.isArray(value) && value.length > 0) {
+          throw new Error(
+            `trigger.${field} is not supported: the Automation API rejects a populated ` +
+              `${field} (HTTP 500, empty body) and the value form it expects is unverified. ` +
+              `Remove ${field} from the trigger and filter on the status inside the rule ` +
+              'instead, with a jira.comparator.condition comparing ' +
+              `"{{changelog.status.${field === 'fromStatus' ? 'fromString' : 'toString'}}}" ` +
+              `against each status (received: ${JSON.stringify(value)}).`
+          );
+        }
+      }
+
       return {
         eventFilters: [scope],
-        fromStatus: Array.isArray(fromStatus) ? fromStatus : [],
-        toStatus: Array.isArray(toStatus) ? toStatus : [],
+        fromStatus: [],
+        toStatus: [],
         eventKey: 'jira:issue_updated',
         issueEvent: 'issue_generic',
       };
