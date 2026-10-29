@@ -706,8 +706,32 @@ test('a top level closed too early says which run of closers ended it and not to
   assert.equal(result.ok, false);
   assert.match(result.error, /^ruleSpec is not valid JSON \(Unexpected non-whitespace character after JSON\)/);
   assert.match(result.error, /finished at >>>HERE<<< with 33 more characters after it/);
-  assert.match(result.error, /from `branches\[0\]\.actions\[0\]\.value` out to the top level/);
-  assert.match(result.error, /remove it rather than adding a bracket at the end/);
+  assert.match(result.error, /Delete the 2 closing brackets `\]\}` just before >>>HERE<<<: they closed the list at `branches` too early/);
+  assert.match(result.error, /with them removed the spec parses/);
+});
+
+test('the SDP shape, three branch levels deep then a sibling branch, gets the exact closers to delete', async () => {
+  // Reduced from the 2026-10-30 Rovo trace: the agent closed the top-level
+  // `branches` list and the rule after the deepest comment, then carried on
+  // with the second sibling branch.
+  const comment = '{"type":"jira.issue.comment","value":{"comment":"{{webhookResponse.body}}","addCommentOnce":true}}';
+  const spec =
+    '{"name":"SDP","actions":[{"type":"w"}],"branches":[' +
+      '{"conditionMatchType":"ALL","conditions":[],"actions":[{"type":"e"}],"branches":[' +
+        '{"conditionMatchType":"ANY","conditions":[],"actions":[{"type":"s"}],"branches":[' +
+          `{"conditions":[],"actions":[${comment}]}]}]}]}` +
+    `,{"conditions":[],"actions":[${comment}]}]}`;
+  const result = await parseError(spec);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /\}\}\]\}\]\}\]\}\]\}>>>HERE<<<,\{"conditions"/);
+  assert.match(result.error, /Delete the 2 closing brackets `\]\}` just before >>>HERE<<<: they closed the list at `branches` too early/);
+});
+
+test('a closed-too-early spec that trailing deletions cannot fix keeps the general advice', async () => {
+  const result = await parseError('{"a":[1]},{"b":2}');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /One of those closers, or one earlier, is extra: remove it rather than adding a bracket at the end/);
+  assert.doesNotMatch(result.error, /Delete the/);
 });
 
 test('braces and escaped quotes inside strings do not move the bracket path', async () => {

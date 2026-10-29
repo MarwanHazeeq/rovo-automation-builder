@@ -1872,7 +1872,9 @@ function describeJsonError(text, error) {
  * Say which bracket to change, from the blocks open at `position`. Three
  * shapes cover the faults seen in agent-written specs:
  * - the spec ends with blocks still open: list them, innermost first;
- * - the top level closed before the end: name the run of closers that did it;
+ * - the top level closed before the end: name the trailing closers to delete
+ *   when exactly one such deletion makes the spec parse, else the run of
+ *   closers that did it;
  * - a closer that does not match the open block: name the block and its closer.
  * Returns '' when none applies, leaving just the excerpt.
  */
@@ -1890,9 +1892,37 @@ function describeBracketFix(text, position, reason) {
     // between them allowed). The earliest of them closed the deepest block.
     let first = closed.length - 1;
     while (first > 0 && text.slice(closed[first - 1].position + 1, closed[first].position).trim() === '') first -= 1;
-    const innermost = closed[first]?.path;
-    return `The JSON finished at >>>HERE<<< with ${text.length - position} more characters after it, so ` +
-      'that text is outside the rule. The closing brackets just before >>>HERE<<< closed every block ' +
+    const run = closed.slice(first);
+    const finished = `The JSON finished at >>>HERE<<< with ${text.length - position} more characters after it, so ` +
+      'that text is outside the rule. ';
+
+    // The usual fault is a few closers too many at the END of that run. Try
+    // deleting the last 1, 2, 3... of them and keep the deletion that makes
+    // the whole spec parse. Only an unambiguous single answer is reported:
+    // it proves the result is valid JSON, not that it is what was meant.
+    const fixes = [];
+    for (let count = 1; count <= run.length; count += 1) {
+      const removed = new Set(run.slice(-count).map((entry) => entry.position));
+      // split('') indexes UTF-16 units, the same units JSON.parse positions count.
+      const candidate = text.split('').filter((_, index) => !removed.has(index)).join('');
+      try {
+        JSON.parse(candidate);
+        fixes.push(count);
+      } catch {
+        // Not this many; try the next count.
+      }
+    }
+    if (fixes.length === 1) {
+      const count = fixes[0];
+      const firstRemoved = run[run.length - count];
+      const brackets = run.slice(-count).map((entry) => text[entry.position]).join('');
+      return finished +
+        `Delete the ${count} closing bracket${count > 1 ? 's' : ''} \`${brackets}\` just before >>>HERE<<<: ` +
+        `they closed ${describeBlock(firstRemoved)} too early, and with them removed the spec parses.`;
+    }
+
+    const innermost = run[0]?.path;
+    return finished + 'The closing brackets just before >>>HERE<<< closed every block ' +
       `from ${innermost ? `\`${innermost}\`` : 'the innermost one'} out to the top level. One of those ` +
       'closers, or one earlier, is extra: remove it rather than adding a bracket at the end.';
   }
@@ -1948,7 +1978,7 @@ function scanJsonBrackets(text, end) {
       open.push({ opener: char, path: childPath(top), key: null, index: 0, expectingKey: char === '{' });
     } else if (char === '}' || char === ']') {
       const block = open.pop();
-      if (block) closed.push({ position: i, path: block.path });
+      if (block) closed.push({ position: i, path: block.path, opener: block.opener });
     } else if (char === ',' && top) {
       if (top.opener === '[') top.index += 1;
       else top.expectingKey = true;
