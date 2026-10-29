@@ -220,16 +220,20 @@ test('a web request whose url is not a URL is refused, naming the component and 
   assert.match(result.error, /\.invalid/);
 });
 
-// Issue #22: "<redacted URL>" is put there upstream when a URL holds
-// placeholder text such as "<your-site>"; resending it can never work.
+// Issue #22: "<redacted URL>" is put there upstream, before the agent's tool
+// call is made (the 2026-10-30 Rovo trace shows it in the agent's own input),
+// so the agent cannot see the address and resending can never work.
 test('a url that arrived as <redacted URL> gets its own message', async () => {
   for (const url of ['<redacted URL>', '<redacted URL><your-site>.atlassian.net/rest/api/3/myself']) {
     const result = await prepare({ actions: [LOG('first'), WEBHOOK('https://ok.example.com/a'), WEBHOOK(url)] });
     assert.equal(result.ok, false);
-    assert.match(result.error, /The url of the 2nd web request action was removed before it reached this app \("<redacted URL>"\)/);
-    assert.match(result.error, /placeholder text such as `<your-site>`/);
+    assert.match(result.error, /The url of the 2nd web request action arrived as "<redacted URL>": the address was removed before this app received it/);
+    assert.match(result.error, /you cannot see the real address/);
+    assert.match(result.error, /stand-in such as https:\/\/token-service\.invalid\/path for each one/);
+    assert.match(result.error, /tell the requester which URLs they must fill in before the rule is enabled/);
     assert.match(result.error, /Resending the same spec will fail the same way/);
-    assert.match(result.error, /Never put `<\.\.\.>` in a URL/);
+    // The cause is not known for certain, so the message does not claim one.
+    assert.doesNotMatch(result.error, /This happens when/);
     assert.doesNotMatch(result.error, /Every web request needs a full http\(s\) URL/);
   }
 });
@@ -238,7 +242,7 @@ test('a rule with a stripped url and another bad url lists both', async () => {
   const result = await prepare({ actions: [WEBHOOK('<SYNC_SERVICE_URL>'), WEBHOOK('<REDACTED url>')] });
   assert.equal(result.ok, false);
   assert.match(result.error, /Every web request needs a full http\(s\) URL, but the url of the 1st web request action is "<SYNC_SERVICE_URL>"/);
-  assert.match(result.error, /The url of the 2nd web request action was removed before it reached this app/);
+  assert.match(result.error, /The url of the 2nd web request action arrived as "<redacted URL>"/);
 });
 
 test('a refused URL never quotes the query string, where a signature would sit', async () => {

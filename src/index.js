@@ -2429,10 +2429,11 @@ function validateRulePayload(requestBody, configuredCloudId) {
   // The quoted value stops at "?" so a signed URL's signature is never echoed.
   const positions = describeComponentPositions(rule);
   const badUrls = [];
-  // Issue #22: "<redacted URL>" is never written by this app. It is put in
-  // upstream, before the input reaches Forge, when a URL holds placeholder text
-  // such as "https://<your-site>...". Resending cannot fix it, so it gets its
-  // own message telling the agent what to write instead.
+  // Issue #22: "<redacted URL>" is never written by this app. Rovo puts it in
+  // upstream: the 2026-10-30 trace shows it already in the agent's own tool
+  // input. It has followed placeholder text such as "https://<your-site>...",
+  // but the full set of causes is unknown. The agent cannot see the address,
+  // so the message names no cause and says what to write instead.
   const strippedUrls = [];
   walkComponents(rule.components, (node) => {
     if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook' && !parseHttpUrl(node.value?.url)) {
@@ -2453,11 +2454,11 @@ function validateRulePayload(requestBody, configuredCloudId) {
   if (strippedUrls.length > 0) {
     const which = strippedUrls.join(' and ');
     urlErrors.push(
-      `${which[0].toUpperCase()}${which.slice(1)} ${strippedUrls.length > 1 ? 'were' : 'was'} removed before ` +
-      'it reached this app ("<redacted URL>"). This happens when a URL contains placeholder text such as ' +
-      '`<your-site>`. Resending the same spec will fail the same way. For Jira\'s own REST API use the real ' +
-      'site address; for an unknown external host use a reserved-domain stand-in such as ' +
-      'https://sync-service.invalid/path. Never put `<...>` in a URL.'
+      `${which[0].toUpperCase()}${which.slice(1)} arrived as "<redacted URL>": the address was removed ` +
+      'before this app received it. If it also shows as <redacted URL> in the request or attached ' +
+      'document, you cannot see the real address. Use a reserved-domain stand-in such as ' +
+      'https://token-service.invalid/path for each one, and tell the requester which URLs they must fill ' +
+      'in before the rule is enabled. Resending the same spec will fail the same way.'
     );
   }
   if (urlErrors.length > 0) {

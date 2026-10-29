@@ -41,7 +41,9 @@ modules:
             https://logicalisasia.atlassian.net/...; for an unknown external
             host use a stand-in such as https://sync-service.invalid/path.
             Never put angle-bracket text in a URL: it is stripped before it
-            reaches the app and the draft is refused.
+            reaches the app and the draft is refused. If a URL shows to you
+            as <redacted URL>, you cannot see it: use a .invalid stand-in and
+            tell the requester which URL they must fill in.
             The value must be valid JSON. Close each block before starting
             the next sibling, and count the closing brackets after a smart
             value ({{...}}) separately from the JSON structure.
@@ -87,7 +89,8 @@ modules:
             Web request url: for Jira's own REST API use the real site,
             https://logicalisasia.atlassian.net/...; for an unknown external
             host use a stand-in such as https://sync-service.invalid/path.
-            Never put angle-bracket text in a URL. The value must be valid
+            Never put angle-bracket text in a URL; a URL that shows to you as
+            <redacted URL> becomes a .invalid stand-in. The value must be valid
             JSON; check the closing brackets after each smart value ({{...}}).
             If the previous call failed, change the spec as the error says:
             an unchanged spec fails the same way.
