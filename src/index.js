@@ -1838,11 +1838,19 @@ function collectSpecParts(spec) {
  * only a character offset ("position 841"), which means nothing to a
  * requester, so the text around that offset is quoted with a marker at the
  * exact spot the parser gave up.
+ *
+ * Issue #21: the excerpt alone tells the agent WHERE, not WHAT to change, and
+ * on a large nested spec it then resent the same broken text. So a hint is
+ * added that names the open block (by path, e.g. "branches[1].actions[2]") and
+ * the bracket fix. The hint holds only paths and bracket characters, never
+ * values, because a spec can carry header values.
  */
 function describeJsonError(text, error) {
   const match = /position (\d+)/.exec(error.message);
-  if (!match) return `ruleSpec is not valid JSON: ${error.message}`;
-  const position = Number(match[1]);
+  // "Unexpected end of JSON input" carries no position: it failed at the end.
+  const endOfInput = !match && /Unexpected end of JSON input/.test(error.message);
+  if (!match && !endOfInput) return `ruleSpec is not valid JSON: ${error.message}`;
+  const position = endOfInput ? text.length : Number(match[1]);
   const start = Math.max(0, position - 40);
   const end = Math.min(text.length, position + 40);
   const excerpt =
@@ -1850,8 +1858,109 @@ function describeJsonError(text, error) {
     text.slice(start, position) + '>>>HERE<<<' + text.slice(position, end) +
     (end < text.length ? '...' : '');
   // Keep only the parser's reason, e.g. "Expected double-quoted property name".
-  const reason = error.message.replace(/\s*in JSON at position.*$/s, '');
-  return `ruleSpec is not valid JSON (${reason}). The problem is at >>>HERE<<< in: ${excerpt}`;
+  // Some messages say "after JSON at position N", without "in JSON".
+  const reason = error.message.replace(/\s*(?:in JSON )?at position.*$/s, '');
+  const hint = describeBracketFix(text, position, reason);
+  return (
+    `ruleSpec is not valid JSON (${reason}). The problem is at >>>HERE<<< in: ${excerpt}` +
+    (hint ? ` ${hint}` : '') +
+    ' Fix the brackets and send the corrected spec; resending the same spec will fail the same way.'
+  );
+}
+
+/**
+ * Say which bracket to change, from the blocks open at `position`. Three
+ * shapes cover the faults seen in agent-written specs:
+ * - the spec ends with blocks still open: list them, innermost first;
+ * - the top level closed before the end: name the run of closers that did it;
+ * - a closer that does not match the open block: name the block and its closer.
+ * Returns '' when none applies, leaving just the excerpt.
+ */
+function describeBracketFix(text, position, reason) {
+  const { open, closed } = scanJsonBrackets(text, position);
+
+  if (position >= text.trimEnd().length && open.length > 0) {
+    const blocks = open.slice().reverse().map(describeBlock).join(', ');
+    return `The spec ends with these blocks still open, innermost first: ${blocks}. ` +
+      'Close each one where it should end.';
+  }
+
+  if (/Unexpected non-whitespace character after JSON/.test(reason) && open.length === 0) {
+    // Walk back over the closers that end right before `position` (whitespace
+    // between them allowed). The earliest of them closed the deepest block.
+    let first = closed.length - 1;
+    while (first > 0 && text.slice(closed[first - 1].position + 1, closed[first].position).trim() === '') first -= 1;
+    const innermost = closed[first]?.path;
+    return `The JSON finished at >>>HERE<<< with ${text.length - position} more characters after it, so ` +
+      'that text is outside the rule. The closing brackets just before >>>HERE<<< closed every block ' +
+      `from ${innermost ? `\`${innermost}\`` : 'the innermost one'} out to the top level. One of those ` +
+      'closers, or one earlier, is extra: remove it rather than adding a bracket at the end.';
+  }
+
+  const found = text[position];
+  const top = open[open.length - 1];
+  if ((found === ']' || found === '}') && top && found !== CLOSER_OF[top.opener]) {
+    const kind = top.opener === '{' ? 'object' : 'list';
+    return `At >>>HERE<<< you are inside ${describeBlock(top)}, so \`${found}\` is wrong: ` +
+      `close the ${kind} with \`${CLOSER_OF[top.opener]}\` first.`;
+  }
+  return top ? `At >>>HERE<<< you are inside ${describeBlock(top)}.` : '';
+}
+
+const CLOSER_OF = { '{': '}', '[': ']' };
+
+const describeBlock = (block) =>
+  block.path === ''
+    ? `the top-level ${block.opener === '{' ? 'object' : 'list'}`
+    : `the ${block.opener === '{' ? 'object' : 'list'} at \`${block.path}\``;
+
+/**
+ * Walk `text` up to `end` the way JSON.parse did, tracking only structure.
+ * String contents are skipped (honouring \" escapes), so the {{ }} of smart
+ * values never count as brackets. Each open block keeps its path: an object's
+ * child is named by the key last read, a list's child by its index.
+ * Returns the blocks still open (outermost first) and every block closed, in
+ * order, with the position of its closer.
+ */
+function scanJsonBrackets(text, end) {
+  const open = [];
+  const closed = [];
+  let stringStart = -1;
+  for (let i = 0; i < end; i += 1) {
+    const char = text[i];
+    if (stringStart >= 0) {
+      if (char === '\\') {
+        i += 1;
+      } else if (char === '"') {
+        const top = open[open.length - 1];
+        if (top?.opener === '{' && top.expectingKey) {
+          top.key = text.slice(stringStart + 1, i);
+          top.expectingKey = false;
+        }
+        stringStart = -1;
+      }
+      continue;
+    }
+    const top = open[open.length - 1];
+    if (char === '"') {
+      stringStart = i;
+    } else if (char === '{' || char === '[') {
+      open.push({ opener: char, path: childPath(top), key: null, index: 0, expectingKey: char === '{' });
+    } else if (char === '}' || char === ']') {
+      const block = open.pop();
+      if (block) closed.push({ position: i, path: block.path });
+    } else if (char === ',' && top) {
+      if (top.opener === '[') top.index += 1;
+      else top.expectingKey = true;
+    }
+  }
+  return { open, closed };
+}
+
+function childPath(parent) {
+  if (!parent) return '';
+  if (parent.opener === '[') return `${parent.path}[${parent.index}]`;
+  return parent.path === '' ? String(parent.key) : `${parent.path}.${parent.key}`;
 }
 
 /**
