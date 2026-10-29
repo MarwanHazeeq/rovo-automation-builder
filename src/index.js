@@ -2399,20 +2399,39 @@ function validateRulePayload(requestBody, configuredCloudId) {
   // The quoted value stops at "?" so a signed URL's signature is never echoed.
   const positions = describeComponentPositions(rule);
   const badUrls = [];
+  // Issue #22: "<redacted URL>" is never written by this app. It is put in
+  // upstream, before the input reaches Forge, when a URL holds placeholder text
+  // such as "https://<your-site>...". Resending cannot fix it, so it gets its
+  // own message telling the agent what to write instead.
+  const strippedUrls = [];
   walkComponents(rule.components, (node) => {
     if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook' && !parseHttpUrl(node.value?.url)) {
-      badUrls.push(`the url of ${positions.get(node)} is "${String(node.value?.url ?? '').split('?')[0]}"`);
+      const url = String(node.value?.url ?? '');
+      if (/^\s*<redacted url>/i.test(url)) strippedUrls.push(`the url of ${positions.get(node)}`);
+      else badUrls.push(`the url of ${positions.get(node)} is "${url.split('?')[0]}"`);
     }
   });
+  const urlErrors = [];
   if (badUrls.length > 0) {
-    return {
-      ok: false,
-      error:
-        `Every web request needs a full http(s) URL, but ${badUrls.join('; ')}. ` +
-        'If the real address cannot go in the request, use a stand-in on a reserved domain, e.g. ' +
-        'https://sync-service.invalid/path: it passes Jira\'s check, can never reach a real server, ' +
-        'and the approval ticket lists it as a stand-in to replace before enabling.',
-    };
+    urlErrors.push(
+      `Every web request needs a full http(s) URL, but ${badUrls.join('; ')}. ` +
+      'If the real address cannot go in the request, use a stand-in on a reserved domain, e.g. ' +
+      'https://sync-service.invalid/path: it passes Jira\'s check, can never reach a real server, ' +
+      'and the approval ticket lists it as a stand-in to replace before enabling.'
+    );
+  }
+  if (strippedUrls.length > 0) {
+    const which = strippedUrls.join(' and ');
+    urlErrors.push(
+      `${which[0].toUpperCase()}${which.slice(1)} ${strippedUrls.length > 1 ? 'were' : 'was'} removed before ` +
+      'it reached this app ("<redacted URL>"). This happens when a URL contains placeholder text such as ' +
+      '`<your-site>`. Resending the same spec will fail the same way. For Jira\'s own REST API use the real ' +
+      'site address; for an unknown external host use a reserved-domain stand-in such as ' +
+      'https://sync-service.invalid/path. Never put `<...>` in a URL.'
+    );
+  }
+  if (urlErrors.length > 0) {
+    return { ok: false, error: urlErrors.join(' ') };
   }
 
   if (configuredCloudId !== scopeMatch[1]) {

@@ -220,6 +220,27 @@ test('a web request whose url is not a URL is refused, naming the component and 
   assert.match(result.error, /\.invalid/);
 });
 
+// Issue #22: "<redacted URL>" is put there upstream when a URL holds
+// placeholder text such as "<your-site>"; resending it can never work.
+test('a url that arrived as <redacted URL> gets its own message', async () => {
+  for (const url of ['<redacted URL>', '<redacted URL><your-site>.atlassian.net/rest/api/3/myself']) {
+    const result = await prepare({ actions: [LOG('first'), WEBHOOK('https://ok.example.com/a'), WEBHOOK(url)] });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /The url of the 2nd web request action was removed before it reached this app \("<redacted URL>"\)/);
+    assert.match(result.error, /placeholder text such as `<your-site>`/);
+    assert.match(result.error, /Resending the same spec will fail the same way/);
+    assert.match(result.error, /Never put `<\.\.\.>` in a URL/);
+    assert.doesNotMatch(result.error, /Every web request needs a full http\(s\) URL/);
+  }
+});
+
+test('a rule with a stripped url and another bad url lists both', async () => {
+  const result = await prepare({ actions: [WEBHOOK('<SYNC_SERVICE_URL>'), WEBHOOK('<REDACTED url>')] });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Every web request needs a full http\(s\) URL, but the url of the 1st web request action is "<SYNC_SERVICE_URL>"/);
+  assert.match(result.error, /The url of the 2nd web request action was removed before it reached this app/);
+});
+
 test('a refused URL never quotes the query string, where a signature would sit', async () => {
   const result = await prepare({ actions: [WEBHOOK('https://<HOST>/invoke?sig=SECRETSIG')] });
   assert.equal(result.ok, false);
