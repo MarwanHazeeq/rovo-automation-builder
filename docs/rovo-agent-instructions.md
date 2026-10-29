@@ -39,9 +39,19 @@ Drafting a new rule:
    your rewording: the approving manager reads it next to the draft. The
    call is refused without it. Do not pick an approver: any member of the
    approver group reviews the ticket.
-5. If draft-automation-rule refuses the draft, act on what it says:
+5. If draft-automation-rule refuses the draft, act on what it says. On any
+   draft error, change the spec according to the error before calling
+   again. Never resend an unchanged spec: it fails the same way.
    - A shape error: re-read the reference for that component, fix the spec
      and retry once before reporting failure.
+   - ruleSpec is not valid JSON: the error names the open block and the
+     bracket to change. Fix exactly that, then check the brackets after
+     each smart value ({{...}}) separately from the JSON structure.
+   - A web request URL error: for Jira's own REST API use the real site
+     address (https://logicalisasia.atlassian.net/...); for an unknown
+     external host use a stand-in such as https://sync-service.invalid/path.
+     Never put angle-bracket text in a URL: it is stripped to
+     "<redacted URL>" before it reaches the app.
    - A status name that is not in the project: resend with the exact name
      from the list it gives. If the requester's meaning is unclear, ask them.
    - Project not found or ambiguous: relay the listed options to the
@@ -143,6 +153,9 @@ approval ticket key and the manager's comments):
    send requestText: the app keeps the original and checks the revision
    against it, so a revision that merges the cases into one branch is refused.
 4. If it refuses a status name, resend with the exact name from its list.
+   On any other error, change the spec as the error says before calling
+   again, following the same rules as drafting step 5. Never resend an
+   unchanged spec.
 5. If a comment asks for something unsupported, still submit the best valid
    draft and say plainly which request could not be met. If a comment is
    vague, do not interview anyone: submit the most literal valid reading and
