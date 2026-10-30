@@ -221,21 +221,76 @@ test('a web request whose url is not a URL is refused, naming the component and 
 });
 
 // Issue #22: "<redacted URL>" is put there upstream, before the agent's tool
-// call is made (the 2026-10-30 Rovo trace shows it in the agent's own input),
-// so the agent cannot see the address and resending can never work.
+// call is made (the 2026-10-30 Rovo traces show it in the agent's own input,
+// even for the real site address), so resending a full URL can never work.
 test('a url that arrived as <redacted URL> gets its own message', async () => {
   for (const url of ['<redacted URL>', '<redacted URL><your-site>.atlassian.net/rest/api/3/myself']) {
     const result = await prepare({ actions: [LOG('first'), WEBHOOK('https://ok.example.com/a'), WEBHOOK(url)] });
     assert.equal(result.ok, false);
     assert.match(result.error, /The url of the 2nd web request action arrived as "<redacted URL>": the address was removed before this app received it/);
-    assert.match(result.error, /you cannot see the real address/);
-    assert.match(result.error, /stand-in such as https:\/\/token-service\.invalid\/path for each one/);
+    assert.match(result.error, /For Jira's own REST API, send only the path, starting with \/rest\//);
+    assert.match(result.error, /stand-in such as https:\/\/sync-service\.invalid\/path/);
     assert.match(result.error, /tell the requester which URLs they must fill in before the rule is enabled/);
     assert.match(result.error, /Resending the same spec will fail the same way/);
     // The cause is not known for certain, so the message does not claim one.
     assert.doesNotMatch(result.error, /This happens when/);
     assert.doesNotMatch(result.error, /Every web request needs a full http\(s\) URL/);
   }
+});
+
+// Rovo removes a real site address the model writes, so for Jira's own REST
+// API the agent sends only the path and the app adds the site address, read
+// from Jira's serverInfo.
+const SITE_BASE_URL = 'https://example.atlassian.net';
+function prepareWithServerInfo(specBody, serverInfo = async () => mockResponse(200, { baseUrl: SITE_BASE_URL })) {
+  const calls = [];
+  const fetchImplementation = async (url, options) => {
+    calls.push(String(url));
+    return String(url).endsWith('/rest/api/3/serverInfo') ? serverInfo() : projectSearch(url, options);
+  };
+  const payload = {
+    ruleSpec: JSON.stringify({
+      name: 'Changelog', projectName: 'SOCDemo', trigger: { type: 'jira.issue.event.trigger:created' }, ...specBody,
+    }),
+  };
+  return withForgeEnvironment(fetchImplementation, async () => ({ result: await prepareRule(payload), calls }));
+}
+const webhookUrls = (rule) => rule.components.filter((node) => node.type === 'jira.issue.outgoing.webhook').map((node) => node.value.url);
+
+test('a /rest/ path gets the site address from serverInfo, smart values left as written', async () => {
+  const { result, calls } = await prepareWithServerInfo({
+    actions: [WEBHOOK('/rest/api/3/issue/{{issue.key}}/changelog?maxResults=100'), WEBHOOK('/rest/api/3/myself')],
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(webhookUrls(result.rule), [
+    `${SITE_BASE_URL}/rest/api/3/issue/{{issue.key}}/changelog?maxResults=100`,
+    `${SITE_BASE_URL}/rest/api/3/myself`,
+  ]);
+  assert.equal(calls.filter((url) => url.endsWith('/rest/api/3/serverInfo')).length, 1);
+  assert.ok(calls.includes('https://api.atlassian.com/ex/jira/test-cloud/rest/api/3/serverInfo'));
+});
+
+test('a full URL is left alone and serverInfo is not asked for', async () => {
+  const { result, calls } = await prepareWithServerInfo({ actions: [WEBHOOK('https://sync-service.invalid/sync')] });
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(webhookUrls(result.rule), ['https://sync-service.invalid/sync']);
+  assert.ok(!calls.some((url) => url.endsWith('/rest/api/3/serverInfo')));
+});
+
+test('a path outside /rest/ is refused with the path hint', async () => {
+  const { result } = await prepareWithServerInfo({ actions: [WEBHOOK('/browse/SOC-1')] });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /the url of the 1st web request action is "\/browse\/SOC-1"/);
+  assert.match(result.error, /For Jira's own REST API, send only the path, starting with \/rest\//);
+});
+
+test('a failed serverInfo call refuses the draft and says so', async () => {
+  const { result } = await prepareWithServerInfo(
+    { actions: [WEBHOOK('/rest/api/3/myself')] },
+    async () => mockResponse(500, { errorMessages: ['boom'] })
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /serverInfo request for the site address returned status 500/);
 });
 
 test('a rule with a stripped url and another bad url lists both', async () => {

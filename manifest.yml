@@ -37,13 +37,13 @@ modules:
             customfield_11639 (number/float) and Time to first response is
             customfield_10049 (SLA). To convert the SLA's elapsed milliseconds
             to decimal minutes, use a Jira math expression dividing by 60000.
-            Web request url: for Jira's own REST API use the real site,
-            https://logicalisasia.atlassian.net/...; for an unknown external
-            host use a stand-in such as https://sync-service.invalid/path.
-            Never put angle-bracket text in a URL: it is stripped before it
-            reaches the app and the draft is refused. If a URL shows to you
-            as <redacted URL>, you cannot see it: use a .invalid stand-in and
-            tell the requester which URL they must fill in.
+            Web request url: for Jira's own REST API send only the path, e.g.
+            /rest/api/3/issue/{{issue.key}}/changelog; the app adds the site
+            address. Never write a full Jira site URL or angle-bracket text in
+            a URL: it is removed before it reaches the app and the draft is
+            refused. For any other host use a stand-in such as
+            https://sync-service.invalid/path and tell the requester which URL
+            they must fill in.
             The value must be valid JSON. Close each block before starting
             the next sibling, and count the closing brackets after a smart
             value ({{...}}) separately from the JSON structure.
@@ -86,11 +86,10 @@ modules:
           description: |
             The complete revised ruleSpec JSON, in the same format as for
             draft-automation-rule (not a diff), including projectName.
-            Web request url: for Jira's own REST API use the real site,
-            https://logicalisasia.atlassian.net/...; for an unknown external
-            host use a stand-in such as https://sync-service.invalid/path.
-            Never put angle-bracket text in a URL; a URL that shows to you as
-            <redacted URL> becomes a .invalid stand-in. The value must be valid
+            Web request url: for Jira's own REST API send only the path
+            (/rest/...); the app adds the site address. For any other host use
+            a stand-in such as https://sync-service.invalid/path. Never write a
+            full Jira site URL or angle-bracket text in a URL. The value must be valid
             JSON; check the closing brackets after each smart value ({{...}}).
             If the previous call failed, change the spec as the error says:
             an unchanged spec fails the same way.

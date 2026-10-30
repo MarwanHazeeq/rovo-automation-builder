@@ -337,12 +337,12 @@ const ACTION_LIBRARY = {
       authenticate: true,
     },
     notes:
-      'url must be a full http(s) URL (smart values allowed): the builder refuses anything else, because Jira ' +
-      'rejects it at create time. For Jira\'s own REST API use the real site address. For an unknown external ' +
-      'host use a stand-in on a reserved domain such as https://sync-service.invalid/path; the approval ticket ' +
-      'lists it for replacement. Never put angle-bracket text in a URL: it is stripped to "<redacted URL>" ' +
-      'before it reaches the app, and the draft is refused. If a URL already shows to you as ' +
-      '<redacted URL>, you cannot see it: use a .invalid stand-in and tell the requester to fill it in. ' +
+      'url must be a full http(s) URL, or a /rest/ path for Jira\'s own REST API (smart values allowed): the ' +
+      'builder refuses anything else, because Jira rejects it at create time. For Jira\'s own REST API send ' +
+      'only the path, e.g. /rest/api/3/issue/{{issue.key}}/changelog; the app adds the site address. For any ' +
+      'other host use a stand-in on a reserved domain such as https://sync-service.invalid/path; the approval ' +
+      'ticket lists it for replacement. Never write a full Jira site URL or angle-bracket text in a URL: it is ' +
+      'removed ("<redacted URL>") before it reaches the app, and the draft is refused. ' +
       'NEVER send an Authorization header: the builder rejects it. Set "authenticate": true instead and it ' +
       'adds an Authorization header holding a placeholder (REPLACE_ME_BEFORE_ENABLING) for a human to ' +
       'replace in the Automation UI before enabling the rule; omit it if the endpoint needs no auth. ' +

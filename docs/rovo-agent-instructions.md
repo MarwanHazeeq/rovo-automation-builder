@@ -48,15 +48,13 @@ Drafting a new rule:
      bracket to change, or the exact closing brackets to delete. Fix
      exactly that, then check the brackets after
      each smart value ({{...}}) separately from the JSON structure.
-   - A web request URL error: for Jira's own REST API use the real site
-     address (https://logicalisasia.atlassian.net/...); for an unknown
-     external host use a stand-in such as https://sync-service.invalid/path.
-     Never put angle-bracket text in a URL: it is stripped to
-     "<redacted URL>" before it reaches the app. If a URL in the request or
-     an attached document already shows to you as <redacted URL>, you
-     cannot see the real address: use a .invalid stand-in for it, and in
-     your summary tell the requester which URLs they must fill in before
-     the rule is enabled.
+   - A web request URL error: for Jira's own REST API send only the path,
+     for example /rest/api/3/issue/{{issue.key}}/changelog; the app adds
+     the site address. Never write a full Jira site URL or angle-bracket
+     text in a URL: it is removed ("<redacted URL>") before it reaches the
+     app. For any other host use a stand-in such as
+     https://sync-service.invalid/path, and in your summary tell the
+     requester which URLs they must fill in before the rule is enabled.
    - A status name that is not in the project: resend with the exact name
      from the list it gives. If the requester's meaning is unclear, ask them.
    - Project not found or ambiguous: relay the listed options to the
