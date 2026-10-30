@@ -726,6 +726,13 @@ export async function prepareRule(payload) {
     }
   }
 
+  // After both input paths, because a pasted full payload also came through Rovo.
+  try {
+    await completeJiraPaths(requestBody, configuredCloudId, email, token);
+  } catch (error) {
+    return failure(`ruleSpec could not be converted into a rule: ${error.message}`);
+  }
+
   const validation = validateRulePayload(requestBody, configuredCloudId);
   if (!validation.ok) return failure(validation.error);
 
@@ -931,6 +938,54 @@ async function fetchJiraFieldMetadata(cloudId, email, token) {
   }
 
   return body;
+}
+
+/**
+ * Put the site address in front of every web request url that is a Jira REST
+ * path ("/rest/..."), in place.
+ *
+ * Why: Rovo removes a real web address the model writes before the tool call
+ * reaches this app (it arrives as "<redacted URL>"; the 2026-10-30 traces show
+ * it even for this site's own address). A bare path has no host to remove, so
+ * the agent sends the path and the address comes from Jira itself. The stored
+ * draft then holds a full https URL, which Jira checks at create time.
+ * A path anywhere else ("/browse/...") is left as it is and refused later by
+ * validateRulePayload. serverInfo is fetched only when a path is present.
+ */
+async function completeJiraPaths(requestBody, cloudId, email, token) {
+  const webhooks = [];
+  walkComponents(requestBody?.rule?.components, (node) => {
+    if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook' &&
+        typeof node.value?.url === 'string' && node.value.url.trim().startsWith('/rest/')) {
+      webhooks.push(node);
+    }
+  });
+  if (webhooks.length === 0) return;
+
+  const auth = Buffer.from(`${email}:${token}`).toString('base64');
+  const url = `${JIRA_SITE_API_BASE}/${cloudId}/rest/api/3/serverInfo`;
+  console.log(`[completeJiraPaths] GET ${url} for ${webhooks.length} web request path(s)`);
+  let response;
+  let body;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' },
+    });
+    body = await readJsonOrText(response);
+  } catch (error) {
+    throw new Error(`The serverInfo request for the site address failed: ${error.message}`);
+  }
+  if (response.status !== 200) {
+    throw new Error(`The serverInfo request for the site address returned status ${response.status}; expected 200.`);
+  }
+  const baseUrl = parseHttpUrl(body?.baseUrl) && String(body.baseUrl).replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new Error('The serverInfo response had no http(s) baseUrl, so the site address could not be added.');
+  }
+  for (const node of webhooks) {
+    node.value.url = baseUrl + node.value.url.trim();
+  }
 }
 
 // A short query such as "SOC" can match many projects by substring, so the
@@ -1838,11 +1893,19 @@ function collectSpecParts(spec) {
  * only a character offset ("position 841"), which means nothing to a
  * requester, so the text around that offset is quoted with a marker at the
  * exact spot the parser gave up.
+ *
+ * Issue #21: the excerpt alone tells the agent WHERE, not WHAT to change, and
+ * on a large nested spec it then resent the same broken text. So a hint is
+ * added that names the open block (by path, e.g. "branches[1].actions[2]") and
+ * the bracket fix. The hint holds only paths and bracket characters, never
+ * values, because a spec can carry header values.
  */
 function describeJsonError(text, error) {
   const match = /position (\d+)/.exec(error.message);
-  if (!match) return `ruleSpec is not valid JSON: ${error.message}`;
-  const position = Number(match[1]);
+  // "Unexpected end of JSON input" carries no position: it failed at the end.
+  const endOfInput = !match && /Unexpected end of JSON input/.test(error.message);
+  if (!match && !endOfInput) return `ruleSpec is not valid JSON: ${error.message}`;
+  const position = endOfInput ? text.length : Number(match[1]);
   const start = Math.max(0, position - 40);
   const end = Math.min(text.length, position + 40);
   const excerpt =
@@ -1850,8 +1913,139 @@ function describeJsonError(text, error) {
     text.slice(start, position) + '>>>HERE<<<' + text.slice(position, end) +
     (end < text.length ? '...' : '');
   // Keep only the parser's reason, e.g. "Expected double-quoted property name".
-  const reason = error.message.replace(/\s*in JSON at position.*$/s, '');
-  return `ruleSpec is not valid JSON (${reason}). The problem is at >>>HERE<<< in: ${excerpt}`;
+  // Some messages say "after JSON at position N", without "in JSON".
+  const reason = error.message.replace(/\s*(?:in JSON )?at position.*$/s, '');
+  const hint = describeBracketFix(text, position, reason);
+  return (
+    `ruleSpec is not valid JSON (${reason}). The problem is at >>>HERE<<< in: ${excerpt}` +
+    (hint ? ` ${hint}` : '') +
+    ' Fix the brackets and send the corrected spec; resending the same spec will fail the same way.'
+  );
+}
+
+/**
+ * Say which bracket to change, from the blocks open at `position`. Three
+ * shapes cover the faults seen in agent-written specs:
+ * - the spec ends with blocks still open: list them, innermost first;
+ * - the top level closed before the end: name the trailing closers to delete
+ *   when exactly one such deletion makes the spec parse, else the run of
+ *   closers that did it;
+ * - a closer that does not match the open block: name the block and its closer.
+ * Returns '' when none applies, leaving just the excerpt.
+ */
+function describeBracketFix(text, position, reason) {
+  const { open, closed } = scanJsonBrackets(text, position);
+
+  if (position >= text.trimEnd().length && open.length > 0) {
+    const blocks = open.slice().reverse().map(describeBlock).join(', ');
+    return `The spec ends with these blocks still open, innermost first: ${blocks}. ` +
+      'Close each one where it should end.';
+  }
+
+  if (/Unexpected non-whitespace character after JSON/.test(reason) && open.length === 0) {
+    // Walk back over the closers that end right before `position` (whitespace
+    // between them allowed). The earliest of them closed the deepest block.
+    let first = closed.length - 1;
+    while (first > 0 && text.slice(closed[first - 1].position + 1, closed[first].position).trim() === '') first -= 1;
+    const run = closed.slice(first);
+    const finished = `The JSON finished at >>>HERE<<< with ${text.length - position} more characters after it, so ` +
+      'that text is outside the rule. ';
+
+    // The usual fault is a few closers too many at the END of that run. Try
+    // deleting the last 1, 2, 3... of them and keep the deletion that makes
+    // the whole spec parse. Only an unambiguous single answer is reported:
+    // it proves the result is valid JSON, not that it is what was meant.
+    const fixes = [];
+    for (let count = 1; count <= run.length; count += 1) {
+      const removed = new Set(run.slice(-count).map((entry) => entry.position));
+      // split('') indexes UTF-16 units, the same units JSON.parse positions count.
+      const candidate = text.split('').filter((_, index) => !removed.has(index)).join('');
+      try {
+        JSON.parse(candidate);
+        fixes.push(count);
+      } catch {
+        // Not this many; try the next count.
+      }
+    }
+    if (fixes.length === 1) {
+      const count = fixes[0];
+      const firstRemoved = run[run.length - count];
+      const brackets = run.slice(-count).map((entry) => text[entry.position]).join('');
+      return finished +
+        `Delete the ${count} closing bracket${count > 1 ? 's' : ''} \`${brackets}\` just before >>>HERE<<<: ` +
+        `they closed ${describeBlock(firstRemoved)} too early, and with them removed the spec parses.`;
+    }
+
+    const innermost = run[0]?.path;
+    return finished + 'The closing brackets just before >>>HERE<<< closed every block ' +
+      `from ${innermost ? `\`${innermost}\`` : 'the innermost one'} out to the top level. One of those ` +
+      'closers, or one earlier, is extra: remove it rather than adding a bracket at the end.';
+  }
+
+  const found = text[position];
+  const top = open[open.length - 1];
+  if ((found === ']' || found === '}') && top && found !== CLOSER_OF[top.opener]) {
+    const kind = top.opener === '{' ? 'object' : 'list';
+    return `At >>>HERE<<< you are inside ${describeBlock(top)}, so \`${found}\` is wrong: ` +
+      `close the ${kind} with \`${CLOSER_OF[top.opener]}\` first.`;
+  }
+  return top ? `At >>>HERE<<< you are inside ${describeBlock(top)}.` : '';
+}
+
+const CLOSER_OF = { '{': '}', '[': ']' };
+
+const describeBlock = (block) =>
+  block.path === ''
+    ? `the top-level ${block.opener === '{' ? 'object' : 'list'}`
+    : `the ${block.opener === '{' ? 'object' : 'list'} at \`${block.path}\``;
+
+/**
+ * Walk `text` up to `end` the way JSON.parse did, tracking only structure.
+ * String contents are skipped (honouring \" escapes), so the {{ }} of smart
+ * values never count as brackets. Each open block keeps its path: an object's
+ * child is named by the key last read, a list's child by its index.
+ * Returns the blocks still open (outermost first) and every block closed, in
+ * order, with the position of its closer.
+ */
+function scanJsonBrackets(text, end) {
+  const open = [];
+  const closed = [];
+  let stringStart = -1;
+  for (let i = 0; i < end; i += 1) {
+    const char = text[i];
+    if (stringStart >= 0) {
+      if (char === '\\') {
+        i += 1;
+      } else if (char === '"') {
+        const top = open[open.length - 1];
+        if (top?.opener === '{' && top.expectingKey) {
+          top.key = text.slice(stringStart + 1, i);
+          top.expectingKey = false;
+        }
+        stringStart = -1;
+      }
+      continue;
+    }
+    const top = open[open.length - 1];
+    if (char === '"') {
+      stringStart = i;
+    } else if (char === '{' || char === '[') {
+      open.push({ opener: char, path: childPath(top), key: null, index: 0, expectingKey: char === '{' });
+    } else if (char === '}' || char === ']') {
+      const block = open.pop();
+      if (block) closed.push({ position: i, path: block.path, opener: block.opener });
+    } else if (char === ',' && top) {
+      if (top.opener === '[') top.index += 1;
+      else top.expectingKey = true;
+    }
+  }
+  return { open, closed };
+}
+
+function childPath(parent) {
+  if (!parent) return '';
+  if (parent.opener === '[') return `${parent.path}[${parent.index}]`;
+  return parent.path === '' ? String(parent.key) : `${parent.path}.${parent.key}`;
 }
 
 /**
@@ -2290,20 +2484,42 @@ function validateRulePayload(requestBody, configuredCloudId) {
   // The quoted value stops at "?" so a signed URL's signature is never echoed.
   const positions = describeComponentPositions(rule);
   const badUrls = [];
+  // Issue #22: "<redacted URL>" is never written by this app. Rovo puts it in
+  // upstream: the 2026-10-30 traces show it already in the agent's own tool
+  // input, for placeholder text and for this site's real address alike, while
+  // .invalid hosts arrive intact. The exact rule is not documented, so the
+  // message names no cause and says what to send instead.
+  const strippedUrls = [];
   walkComponents(rule.components, (node) => {
     if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook' && !parseHttpUrl(node.value?.url)) {
-      badUrls.push(`the url of ${positions.get(node)} is "${String(node.value?.url ?? '').split('?')[0]}"`);
+      const url = String(node.value?.url ?? '');
+      if (/^\s*<redacted url>/i.test(url)) strippedUrls.push(`the url of ${positions.get(node)}`);
+      else badUrls.push(`the url of ${positions.get(node)} is "${url.split('?')[0]}"`);
     }
   });
+  const urlErrors = [];
   if (badUrls.length > 0) {
-    return {
-      ok: false,
-      error:
-        `Every web request needs a full http(s) URL, but ${badUrls.join('; ')}. ` +
-        'If the real address cannot go in the request, use a stand-in on a reserved domain, e.g. ' +
-        'https://sync-service.invalid/path: it passes Jira\'s check, can never reach a real server, ' +
-        'and the approval ticket lists it as a stand-in to replace before enabling.',
-    };
+    urlErrors.push(
+      `Every web request needs a full http(s) URL, but ${badUrls.join('; ')}. ` +
+      'If the real address cannot go in the request, use a stand-in on a reserved domain, e.g. ' +
+      'https://sync-service.invalid/path: it passes Jira\'s check, can never reach a real server, ' +
+      'and the approval ticket lists it as a stand-in to replace before enabling. ' +
+      'For Jira\'s own REST API, send only the path, starting with /rest/; the app adds the site address.'
+    );
+  }
+  if (strippedUrls.length > 0) {
+    const which = strippedUrls.join(' and ');
+    urlErrors.push(
+      `${which[0].toUpperCase()}${which.slice(1)} arrived as "<redacted URL>": the address was removed ` +
+      'before this app received it. For Jira\'s own REST API, send only the path, starting with /rest/ ' +
+      '(for example /rest/api/3/issue/{{issue.key}}/changelog); the app adds the site address. For any ' +
+      'other host, use a reserved-domain stand-in such as https://sync-service.invalid/path, and tell the ' +
+      'requester which URLs they must fill in before the rule is enabled. Resending the same spec will ' +
+      'fail the same way.'
+    );
+  }
+  if (urlErrors.length > 0) {
+    return { ok: false, error: urlErrors.join(' ') };
   }
 
   if (configuredCloudId !== scopeMatch[1]) {

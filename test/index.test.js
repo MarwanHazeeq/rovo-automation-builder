@@ -675,6 +675,87 @@ test('a ruleSpec with a missing brace is rejected with an excerpt, not a bare of
   assert.doesNotMatch(result.error, /position \d+/);
 });
 
+// Issue #21: a JSON error names the bracket to fix, not just where parsing
+// stopped. Each spec below reproduces a fault from the 2026-10-29 SDP logs.
+const parseError = (ruleSpec) =>
+  withForgeEnvironment(async () => {
+    throw new Error('no network call expected');
+  }, () => createJiraAutomationRule({ ruleSpec }));
+
+test('a list closed while an object is still open names the object and the right closer', async () => {
+  // As in the log: `"{{webResponse.body.request.id}}"}}` then `]`, one `}` short.
+  const result = await parseError(
+    '{"name":"Sync","projectName":"SOC","trigger":{"type":"jira.issue.event.trigger:created"},' +
+    '"actions":[{"type":"jira.issue.outgoing.webhook","value":{"url":"https://sdp.invalid/x"}},' +
+    '{"type":"jira.create.variable","value":{"name":"id","query":{"type":"SMART","value":"{{webResponse.body.request.id}}"}}],' +
+    '"branches":[]}'
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^ruleSpec is not valid JSON \(Expected ',' or '\}' after property value\)/);
+  assert.match(result.error, /id\}\}"\}\}>>>HERE<<<\],"branches"/);
+  assert.match(result.error, /inside the object at `actions\[1\]`, so `\]` is wrong: close the object with `\}` first/);
+  assert.match(result.error, /resending the same spec will fail the same way/);
+});
+
+test('a top level closed too early says which run of closers ended it and not to add one at the end', async () => {
+  // As in the log: `...true}}]}]}` closes the whole rule, then `,{"conditions"...` is left outside it.
+  const spec =
+    '{"name":"X","branches":[{"conditions":[],"actions":[{"type":"c","value":{"addCommentOnce":true}}]}]}' +
+    ',{"conditions":[],"actions":[]}]}';
+  const result = await parseError(spec);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^ruleSpec is not valid JSON \(Unexpected non-whitespace character after JSON\)/);
+  assert.match(result.error, /finished at >>>HERE<<< with 33 more characters after it/);
+  assert.match(result.error, /Delete the 2 closing brackets `\]\}` just before >>>HERE<<<: they closed the list at `branches` too early/);
+  assert.match(result.error, /with them removed the spec parses/);
+});
+
+test('the SDP shape, three branch levels deep then a sibling branch, gets the exact closers to delete', async () => {
+  // Reduced from the 2026-10-30 Rovo trace: the agent closed the top-level
+  // `branches` list and the rule after the deepest comment, then carried on
+  // with the second sibling branch.
+  const comment = '{"type":"jira.issue.comment","value":{"comment":"{{webhookResponse.body}}","addCommentOnce":true}}';
+  const spec =
+    '{"name":"SDP","actions":[{"type":"w"}],"branches":[' +
+      '{"conditionMatchType":"ALL","conditions":[],"actions":[{"type":"e"}],"branches":[' +
+        '{"conditionMatchType":"ANY","conditions":[],"actions":[{"type":"s"}],"branches":[' +
+          `{"conditions":[],"actions":[${comment}]}]}]}]}` +
+    `,{"conditions":[],"actions":[${comment}]}]}`;
+  const result = await parseError(spec);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /\}\}\]\}\]\}\]\}\]\}>>>HERE<<<,\{"conditions"/);
+  assert.match(result.error, /Delete the 2 closing brackets `\]\}` just before >>>HERE<<<: they closed the list at `branches` too early/);
+});
+
+test('a closed-too-early spec that trailing deletions cannot fix keeps the general advice', async () => {
+  const result = await parseError('{"a":[1]},{"b":2}');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /One of those closers, or one earlier, is extra: remove it rather than adding a bracket at the end/);
+  assert.doesNotMatch(result.error, /Delete the/);
+});
+
+test('braces and escaped quotes inside strings do not move the bracket path', async () => {
+  const result = await parseError(
+    '{"actions":[{"type":"c","value":{"comment":"\\"{{issue.key}}\\" {{#=}}1{{/}} }]"}],"x":1}'
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /inside the object at `actions\[0\]`, so `\]` is wrong/);
+});
+
+test('a spec that ends with blocks still open lists them innermost first', async () => {
+  const result = await parseError('{"actions":[{"type":"c","value":{"a":1}');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /still open, innermost first: the object at `actions\[0\]`, the list at `actions`, the top-level object/);
+  assert.match(result.error, /resending the same spec will fail the same way/);
+});
+
+test('a spec cut off mid-value lists the open blocks too', async () => {
+  const result = await parseError('{"actions":[{"type":');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /^ruleSpec is not valid JSON \(Unexpected end of JSON input\)/);
+  assert.match(result.error, /the object at `actions\[0\]`, the list at `actions`, the top-level object/);
+});
+
 test('the corrected ruleSpec builds, with sendNotifications beside fields', async () => {
   let createdRule;
   const result = await withForgeEnvironment(async (url, options = {}) => {
