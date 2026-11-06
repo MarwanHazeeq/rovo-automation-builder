@@ -3,7 +3,7 @@ import { findTransitionId, resolveApprovalConfig } from './approval-config.js';
 import { createDraftStore, DRAFT_STATES } from './draft-store.js';
 import { createJiraClient } from './jira-client.js';
 import {
-  digestRule, projectIdFromScope, projectLine, renderDraftAttachment, renderDraftComment, withTicketPrefix,
+  digestRule, projectIdFromScope, renderDraftAttachment, renderDraftComment, renderDraftDescription, withTicketPrefix,
 } from './draft-render.js';
 import { createReadyMarker } from './mark-request-ready.js';
 
@@ -34,19 +34,19 @@ export function createDraftActions({
   return {
     /**
      * Rovo action `draft-automation-rule`.
-     * Inputs: `ruleSpec` (JSON string, same contract as before),
-     * `requestText` (REQUIRED: the requester's message, as sent; it goes on
-     * the ticket for the manager and is checked for words that describe more
-     * than one case, see prepareRule), an optional `requestSummary` (the agent's plain-language description,
-     * shown on the ticket and clearly labelled as the agent's words).
+     * Inputs: `ruleSpec` (JSON string, same contract as before) and
+     * `requestText` (REQUIRED: the requester's message, as sent; it is
+     * stored with the draft and checked for words that describe more than one
+     * case, see prepareRule). Neither reaches the ticket: its description and
+     * comment are rendered from the draft alone (issue #25).
      * No assignee is sent, so Jira's project default assignee applies.
      * Approvers are the members of the approver group, and any of them may
      * pick the ticket up.
      */
     async draftAutomationRule(payload, invocationContext) {
       // The agent writes this field, so it proves nothing about what the
-      // requester said. It is an audit trail for the manager, and the input to
-      // the branch-word check. Never logged: it is free text from a person.
+      // requester said. It is the input to the branch-word check, and is kept
+      // with the draft for revisions. Never logged: it is free text from a person.
       const requestText = typeof payload?.requestText === 'string' ? payload.requestText.trim() : '';
       if (requestText === '') {
         return draftFailure(
@@ -65,6 +65,7 @@ export function createDraftActions({
       if (!prepared.ok) return draftFailure(prepared.error, { details: prepared });
       const projectId = projectIdFromScope(prepared.scope);
       const projectName = prepared.projectName ?? null;
+      const fieldNames = prepared.fieldNames ?? {};
       const statusCheck = await checkStatusNames(jira, prepared.rule, projectId);
       if (!statusCheck.ok) return draftFailure(statusCheck.error);
 
@@ -75,7 +76,7 @@ export function createDraftActions({
           project: { key: config.projectKey },
           issuetype: { id: config.issueTypeId },
           summary: truncate(`Automation rule request: ${prepared.rule.name}`, 250),
-          description: describeRequest({ projectName, projectId, requestText, requestSummary: payload?.requestSummary }),
+          description: renderDraftDescription({ rule: prepared.rule, scope: prepared.scope, projectName, fieldNames }),
         });
       } catch (error) {
         return draftFailure(`The approval ticket could not be created: ${error.message}`);
@@ -93,6 +94,8 @@ export function createDraftActions({
         scope: prepared.scope,
         digest: digestRule(rule),
         projectName,
+        // Custom field names, so the ticket reads {{issue.customfield_N}} as the field name.
+        fieldNames,
         // Kept so a revision is checked against the same words (the revise
         // call is headless and carries no request text of its own).
         requestText,
@@ -200,12 +203,13 @@ export function createDraftActions({
         rule,
         scope: prepared.scope,
         projectName: prepared.projectName ?? null,
+        fieldNames: prepared.fieldNames ?? {},
         digest: digestRule(rule),
         version,
       });
       if (!updated) return draftFailure(`The draft for ${issueKey} could not be revised.`);
 
-      const warning = await postDraftArtifacts(jira, issue.key, updated);
+      const warning = await postDraftArtifacts(jira, issue.key, updated, { rewriteDescription: true });
 
       try {
         // Transitions depend on the ticket's current status, so the resubmit
@@ -336,12 +340,23 @@ function describeReadiness(issueKey, ready) {
  * comment that names the file. The attachment goes first so the comment can
  * say truthfully whether it is there.
  *
- * Neither step is allowed to fail the action: the draft is already stored,
- * and the comment's summary is enough for the manager to decide on. Problems
- * come back as one warning string (or null when both worked).
+ * On a revision (`rewriteDescription`) the ticket description is rewritten
+ * too, so it describes the new draft rather than the first one.
+ *
+ * None of these steps is allowed to fail the action: the draft is already
+ * stored, and the comment's summary is enough for the manager to decide on.
+ * Problems come back as one warning string (or null when all worked).
  */
-async function postDraftArtifacts(jira, issueKey, record) {
+async function postDraftArtifacts(jira, issueKey, record, { rewriteDescription = false } = {}) {
   const warnings = [];
+  if (rewriteDescription) {
+    try {
+      await jira.editIssue(issueKey, { description: renderDraftDescription(record) });
+    } catch (error) {
+      console.error(`[drafts] description on ${issueKey} failed: ${error.message}`);
+      warnings.push(`the ticket description could not be updated (${error.message})`);
+    }
+  }
   const attachment = renderDraftAttachment(record);
   let attachmentName = null;
   let attachmentError = null;
@@ -362,34 +377,6 @@ async function postDraftArtifacts(jira, issueKey, record) {
   return warnings.length
     ? `The draft was stored, but on ${issueKey} ${warnings.join(' and ')}.`
     : null;
-}
-
-/**
- * Ticket description. The target project comes first, above everything the
- * agent wrote, because it is the one thing the app cannot check against the
- * conversation: the manager is the last point where a wrong project is free to
- * fix. Then the requester's message as the agent sent it, then the agent's
- * summary, each labelled as such.
- */
-function describeRequest({ projectName, projectId, requestText, requestSummary }) {
-  const summary = typeof requestSummary === 'string' && requestSummary.trim() !== ''
-    ? truncate(requestSummary.trim(), 5000)
-    : '(no summary supplied)';
-  return {
-    type: 'doc',
-    version: 1,
-    content: [
-      { type: 'paragraph', content: [
-        { type: 'text', text: 'Target project: ', marks: [{ type: 'strong' }] },
-        { type: 'text', text: projectLine(projectName, projectId) },
-      ] },
-      { type: 'paragraph', content: [{ type: 'text', text: "Requester's message, as sent by the agent (not verified):", marks: [{ type: 'strong' }] }] },
-      { type: 'paragraph', content: [{ type: 'text', text: truncate(requestText, 10000) }] },
-      { type: 'paragraph', content: [{ type: 'text', text: 'Request as described by the agent (not authoritative):', marks: [{ type: 'strong' }] }] },
-      { type: 'paragraph', content: [{ type: 'text', text: summary }] },
-      { type: 'paragraph', content: [{ type: 'text', text: 'The authoritative draft is the latest "Draft vN" comment, written by the app.' }] },
-    ],
-  };
 }
 
 function truncate(value, max) {

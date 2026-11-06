@@ -110,6 +110,22 @@ export function createJiraClient(forgeApi = api) {
     },
 
     /**
+     * Replace fields on an issue, as the app (used to rewrite the approval
+     * ticket description when a draft is revised; a headless revise has no
+     * user). `fields` uses the same shape as createIssue. Jira answers 204.
+     */
+    async editIssue(issueIdOrKey, fields) {
+      return expectOk(
+        'edit issue',
+        forgeApi.asApp().requestJira(route`/rest/api/3/issue/${issueIdOrKey}`, {
+          method: 'PUT',
+          headers: jsonHeaders,
+          body: JSON.stringify({ fields }),
+        })
+      );
+    },
+
+    /**
      * Read one project property's value, as the app. Project properties are
      * small JSON values stored on a Jira project; an admin can change them
      * with one REST call, with no app redeploy. A property that was never set

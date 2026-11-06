@@ -670,6 +670,9 @@ export async function prepareRule(payload) {
   // The project's display name when the spec named it; null for a full payload
   // or a bare projectId. Handed back so the approval ticket can show it.
   let projectName = null;
+  // customfield_NNNNN -> display name, for the fields the spec mentions. Empty
+  // for a full payload: the ticket then names them by number.
+  let fieldNames = {};
   console.log(
     `[createJiraAutomationRule] parsed input as ${isFullRulePayload(parsed) ? 'a full rule payload' : 'a rule specification'}`
   );
@@ -703,9 +706,20 @@ export async function prepareRule(payload) {
         (Array.isArray(part.conditions) &&
           part.conditions.some((condition) => condition && condition.type === 'jira.issue.condition'))));
       console.log(`[createJiraAutomationRule] field metadata needed: ${needsFieldMetadata}`);
-      const fieldMetadata = needsFieldMetadata
-        ? await fetchJiraFieldMetadata(configuredCloudId, email, token)
-        : null;
+      // The approval ticket reads {{issue.customfield_10300}} as the field's
+      // NAME, so a spec that mentions a custom field ID also wants the
+      // metadata. That use is cosmetic: if the lookup fails the ticket says
+      // "custom field 10300" instead, and the draft goes ahead.
+      const wantsFieldNames = !needsFieldMetadata && /customfield_\d+/.test(JSON.stringify(parsed));
+      let fieldMetadata = null;
+      if (needsFieldMetadata) {
+        fieldMetadata = await fetchJiraFieldMetadata(configuredCloudId, email, token);
+      } else if (wantsFieldNames) {
+        fieldMetadata = await fetchJiraFieldMetadata(configuredCloudId, email, token).catch((error) => {
+          console.log(`[createJiraAutomationRule] field names unavailable for the ticket: ${error.message}`);
+          return null;
+        });
+      }
       if (fieldMetadata) {
         console.log(`[createJiraAutomationRule] fetched ${fieldMetadata.length} Jira field(s)`);
       }
@@ -721,6 +735,8 @@ export async function prepareRule(payload) {
         actorAccountId,
         fieldMetadata
       );
+      // The built rule too: an edit by field NAME is written under its ID.
+      fieldNames = namesOfReferencedFields([parsed, requestBody], fieldMetadata);
     } catch (error) {
       return failure(`ruleSpec could not be converted into a rule: ${error.message}`);
     }
@@ -754,7 +770,22 @@ export async function prepareRule(payload) {
       );
     }
   }
-  return { ok: true, rule, scope, cloudId, projectName };
+  return { ok: true, rule, scope, cloudId, projectName, fieldNames };
+}
+
+/**
+ * The display names of the custom fields a spec mentions anywhere (in smart
+ * values, field lists or IDs), from the tenant's field metadata. Only the
+ * referenced ones are kept, because the result is stored with the draft.
+ */
+function namesOfReferencedFields(spec, fieldMetadata) {
+  const names = {};
+  if (!Array.isArray(fieldMetadata)) return names;
+  const referenced = new Set(JSON.stringify(spec).match(/customfield_\d+/g) ?? []);
+  for (const field of fieldMetadata) {
+    if (referenced.has(field?.id) && typeof field?.name === 'string') names[field.id] = field.name;
+  }
+  return names;
 }
 
 /**

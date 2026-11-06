@@ -31,7 +31,6 @@ test('draft raises a ticket, freezes the rule and says plainly that nothing was 
   const result = await actions.draftAutomationRule({
     requestText: REQUEST,
     ruleSpec: '{}',
-    requestSummary: 'Log a message when an issue is created',
     context: { accountId: 'me-1' },
   });
 
@@ -44,7 +43,7 @@ test('draft raises a ticket, freezes the rule and says plainly that nothing was 
   const [fields] = jira.calls.createIssue;
   assert.deepEqual(fields.project, { key: 'AUTOAPR' });
   assert.deepEqual(fields.issuetype, { id: '10100' });
-  assert.match(adfText(fields.description), /as described by the agent/);
+  assert.match(adfText(fields.description), /When a work item is created in SOCDemo \(ID 10449\)/);
 
   const stored = await store.getDraft('20001');
   assert.equal(stored.state, DRAFT_STATES.PENDING);
@@ -71,7 +70,7 @@ test('a draft without requestText is refused and raises no ticket', async () => 
   assert.equal(jira.calls.createIssue.length, 0);
 });
 
-test('requestText is stored on the ticket and with the draft, and prepare receives it', async () => {
+test('requestText is stored with the draft and prepare receives it, but it never reaches the ticket', async () => {
   const seen = [];
   const prepare = async (payload) => { seen.push(payload.requestText); return preparedOk()(); };
   const { store, jira, actions } = setup({ prepare });
@@ -79,19 +78,24 @@ test('requestText is stored on the ticket and with the draft, and prepare receiv
   await actions.draftAutomationRule({ requestText: `  ${text}  `, ruleSpec: '{}' });
 
   assert.deepEqual(seen, [text]);
-  const description = adfText(jira.calls.createIssue[0].description);
-  assert.ok(description.includes(text));
-  assert.match(description, /Requester's message, as sent by the agent/);
+  assert.ok(!adfText(jira.calls.createIssue[0].description).includes(text));
+  assert.ok(!adfText(jira.calls.addComment[0].body).includes(text));
   assert.equal((await store.getDraft('20001')).requestText, text);
 });
 
-test('the project name and ID are the first thing on the ticket, above the request, and on the draft comment', async () => {
+// Issue #25: the description is rendered from the draft, never from the
+// conversation. An agent-written summary is ignored even if one is still sent.
+test('the description names the project first, then the rule as steps, with no agent or requester text', async () => {
   const { jira, actions } = setup();
-  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}', requestSummary: 'summary' });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}', requestSummary: 'AGENT-SUMMARY-TEXT' });
 
   const description = adfText(jira.calls.createIssue[0].description);
   assert.match(description, /^Target project:\s+SOCDemo \(ID 10449\)/);
-  assert.ok(description.indexOf('SOCDemo (ID 10449)') < description.indexOf(REQUEST));
+  assert.match(description, /When a work item is created in SOCDemo \(ID 10449\)/);
+  assert.match(description, /\b1\s+\S/);
+  assert.ok(!description.includes(REQUEST));
+  assert.ok(!description.includes('AGENT-SUMMARY-TEXT'));
+  assert.doesNotMatch(JSON.stringify(jira.calls.createIssue[0].description), /jira[.]/);
   assert.match(adfText(jira.calls.addComment[0].body), /Project:\s+SOCDemo \(ID 10449\)/);
 });
 
@@ -266,6 +270,44 @@ test('revise replaces the draft, comments v2 and resubmits, when the manager req
   assert.deepEqual(ctx.jira.calls.transitionIssue, [{ key: 'AUTOAPR-7', transitionId: '31' }]);
 });
 
+test('custom field names from prepare are stored with the draft and used on the ticket', async () => {
+  const prepared = await preparedOk()();
+  prepared.fieldNames = { customfield_10300: 'Customer ITSM Incident' };
+  prepared.rule.components = [{ component: 'ACTION', type: 'codebarrel.action.log', value: '{{issue.customfield_10300}}', conditions: [], children: [] }];
+  const { store, jira, actions } = setup({ prepare: async () => prepared });
+  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
+
+  assert.deepEqual((await store.getDraft('20001')).fieldNames, { customfield_10300: 'Customer ITSM Incident' });
+  assert.match(adfText(jira.calls.createIssue[0].description), /Write to the audit log:\s+Customer ITSM Incident/);
+  assert.match(adfText(jira.calls.addComment[0].body), /Write to the audit log:\s+Customer ITSM Incident/);
+});
+
+// Issue #25: the description describes the rule, so a revision rewrites it.
+test('revise rewrites the ticket description to describe the new draft', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
+  assert.equal(ctx.jira.calls.editIssue.length, 0, 'a first draft sets the description on create');
+  const revised = await preparedOk()();
+  revised.rule.components = [{ component: 'ACTION', type: 'codebarrel.action.log', value: 'revised step', conditions: [], children: [] }];
+  const revise = createDraftActions({ jira: ctx.jira, store: ctx.store, prepare: async () => revised, getEnv: () => APPROVAL_ENV });
+  const result = await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+
+  assert.equal(result.ok, true);
+  const [{ key, fields }] = ctx.jira.calls.editIssue;
+  assert.equal(key, 'AUTOAPR-7');
+  assert.match(adfText(fields.description), /^Target project:\s+SOCDemo \(ID 10449\)/);
+  assert.match(adfText(fields.description), /Write to the audit log: "revised step"/);
+});
+
+test('a description that cannot be rewritten is a warning, not a failed revision', async () => {
+  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus, {
+    jiraOverrides: { editIssue: () => { throw new Error('HTTP 403'); } },
+  });
+  const result = await ctx.actions.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
+  assert.equal(result.ok, true);
+  assert.match(result.warning, /ticket description could not be updated \(HTTP 403\)/);
+  assert.equal(ctx.jira.calls.transitionIssue.length, 1);
+});
+
 test('revise is refused unless the live ticket is in Change Request', async () => {
   const ctx = await seededRevise('10200'); // Pending
   const result = await ctx.actions.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
@@ -392,9 +434,9 @@ test('the draft comment lists every stand-in with its position, under a do-not-e
   const body = adfText(jira.calls.addComment[0].body);
   assert.match(body, /Stand-ins to replace/);
   assert.match(body, /Do not enable it until every item below is replaced/);
-  assert.match(body, /<SDP_CLIENT_SECRET>\s+\(placeholder\) in the 1st create variable action/);
-  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in the 1st web request action/);
-  assert.match(body, /https:\/\/sync-service\.invalid\/sync\?sig=\[redacted\]\s+\(URL on a reserved domain\) in the 1st web request action/);
+  assert.match(body, /<SDP_CLIENT_SECRET>\s+\(placeholder\) in step 1/);
+  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in step 2/);
+  assert.match(body, /https:\/\/sync-service\.invalid\/sync\?sig=\[redacted\]\s+\(URL on a reserved domain\) in step 2/);
   assert.ok(!body.includes('SECRETSIG'));
   assert.ok(!body.includes('real-value-not-shown'));
 });
@@ -413,7 +455,7 @@ test('a revised draft carries the stand-in section too', async () => {
   await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
   const body = adfText(ctx.jira.calls.addComment[0].body);
   assert.match(body, /Draft v2/);
-  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in the 1st web request action/);
+  assert.match(body, /<SYNC_AUTH_KEY>\s+\(placeholder\) in step 2/);
 });
 
 // --- Issue #13: web-response reads on the draft comment --------------------
@@ -423,33 +465,12 @@ const READ_COMPONENTS = [
   { component: 'ACTION', type: 'jira.issue.comment', value: { comment: 'Sync said {{webhookResponse.body}}' }, conditions: [], children: [] },
 ];
 
-test('the draft comment lists each web-response read verbatim, under its request', async () => {
+// Issue #27 removed the section (it reversed #13): a wrong accessor is now
+// caught only from the attached JSON.
+test('a draft comment for a rule with web-response reads has no web-response section', async () => {
   const { jira, actions } = setup({ prepare: preparedWith(READ_COMPONENTS) });
   await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
-  const body = adfText(jira.calls.addComment[0].body);
-  assert.match(body, /Web response reads/);
-  assert.match(body, /After the 1st web request action:\s+\{\{webhookResponse\.body\}\}\s+in the 1st comment action/);
-});
-
-test('a web request with no reads still gets the section, saying so', async () => {
-  const { jira, actions } = setup({ prepare: preparedWith(STAND_IN_COMPONENTS) });
-  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
-  assert.match(adfText(jira.calls.addComment[0].body), /After the 1st web request action:\s+No reads of this response/);
-});
-
-test('a rule with no web request has no web-response section', async () => {
-  const { jira, actions } = setup();
-  await actions.draftAutomationRule({ requestText: REQUEST, ruleSpec: '{}' });
   assert.doesNotMatch(adfText(jira.calls.addComment[0].body), /Web response reads/);
-});
-
-test('a revised draft carries the web-response section too', async () => {
-  const ctx = await seededRevise(APPROVAL_IDS.changesRequestedStatus);
-  const revise = createDraftActions({
-    jira: ctx.jira, store: ctx.store, prepare: preparedWith(READ_COMPONENTS), getEnv: () => APPROVAL_ENV,
-  });
-  await revise.reviseAutomationRuleDraft({ issueKey: 'AUTOAPR-7', ruleSpec: '{}' });
-  assert.match(adfText(ctx.jira.calls.addComment[0].body), /Web response reads/);
 });
 
 // --- status names on the transitioned trigger -------------------------------

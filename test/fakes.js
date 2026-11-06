@@ -24,7 +24,7 @@ export function fakeStorage() {
 export function fakeJira(overrides = {}) {
   const calls = {
     createIssue: [], getIssue: [], getChangelog: [], addComment: [], addAttachment: [], transitionIssue: [],
-    addLabels: [], getProjectProperty: [], getProjectStatuses: [], getTransitions: [], isUserInGroup: [],
+    addLabels: [], editIssue: [], getProjectProperty: [], getProjectStatuses: [], getTransitions: [], isUserInGroup: [],
   };
   return {
     calls,
@@ -39,6 +39,10 @@ export function fakeJira(overrides = {}) {
     async addLabels(key, labels) {
       calls.addLabels.push({ key, labels });
       return overrides.addLabels ? overrides.addLabels(key, labels) : null;
+    },
+    async editIssue(key, fields) {
+      calls.editIssue.push({ key, fields });
+      return overrides.editIssue ? overrides.editIssue(key, fields) : null;
     },
     async getProjectProperty(projectKey, propertyKey) {
       calls.getProjectProperty.push({ projectKey, propertyKey });
