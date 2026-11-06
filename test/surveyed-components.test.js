@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createJiraAutomationRule, walkComponents } from '../src/index.js';
 import { ACTION_LIBRARY, CONDITION_LIBRARY } from '../src/component-library.js';
-import { renderDraftComment, summarizeRule } from '../src/draft-render.js';
+import { outlineRule, renderDraftComment } from '../src/draft-render.js';
 
 const SCOPE = 'ari:cloud:jira:test-cloud:project/10086';
 
@@ -270,20 +270,21 @@ test('the draft comment names where create/clone actions put new issues', async 
   ] });
   assert.equal(result.ok, true, result.error);
 
-  assert.deepEqual(summarizeRule(rule).issueTargets, [
-    { action: 'jira.issue.create', projectId: '10284' },
-    { action: 'jira.issue.clone', projectId: null, sameAsTrigger: true },
+  assert.deepEqual(outlineRule(rule, { scope: SCOPE }).issueTargets, [
+    "Create (step 1) in project 10284, OUTSIDE this rule's project 10086",
+    'Clone (step 2) in the same project as the trigger work item',
   ]);
   const comment = JSON.stringify(renderDraftComment({ rule, version: 1, digest: 'sha256:x', scope: SCOPE }));
-  assert.match(comment, /Creates issues in: /);
-  assert.match(comment, /project 10284, OUTSIDE this rule's project 10086/);
-  assert.match(comment, /same project as the trigger issue/);
+  assert.match(comment, /Creates work items: /);
+  assert.match(comment, /Create a work item in project 10284, OUTSIDE this rule's project 10086/);
+  assert.match(comment, /Clone the work item in the same project as the trigger work item/);
+  assert.doesNotMatch(comment, /jira[.]/);
 });
 
 test('rules without create/clone actions get no target line', async () => {
   const { rule } = await build({});
   const comment = JSON.stringify(renderDraftComment({ rule, version: 1, digest: 'sha256:x', scope: SCOPE }));
-  assert.doesNotMatch(comment, /Creates issues in/);
+  assert.doesNotMatch(comment, /Creates work items/);
 });
 
 // --- Full-payload path (a pasted export skips the builder) -------------------

@@ -33,11 +33,11 @@ Drafting a new rule:
    the whole rule, setup actions included (for example "only when this
    field is Yes"), goes in "trigger.conditions", not in a branch. The
    workedExample on jira.condition.container.block shows the shape.
-4. Call draft-automation-rule with ruleSpec, requestText and a one or two
-   sentence requestSummary of what the user asked for. requestText is the
-   requester's original request copied word for word, never your summary or
-   your rewording: the approving manager reads it next to the draft. The
-   call is refused without it. Do not pick an approver: any member of the
+4. Call draft-automation-rule with ruleSpec and requestText. requestText is
+   the requester's original request copied word for word, never your summary
+   or your rewording: the app checks the draft against it. The call is
+   refused without it. The approval ticket describes the rule from the draft
+   itself, so anything the approver must know has to be in the rule. Do not pick an approver: any member of the
    approver group reviews the ticket.
 5. If draft-automation-rule refuses the draft, act on what it says. On any
    draft error, change the spec according to the error before calling

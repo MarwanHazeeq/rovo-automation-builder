@@ -267,3 +267,47 @@ test('a project key sent as projectId is still rejected', async () => {
   assert.equal(result.ok, false);
   assert.match(result.error, /projectId must be the numeric Jira project ID/);
 });
+
+// The approval ticket reads {{issue.customfield_N}} as the field's name, so a
+// spec that mentions a custom field gets the names of those fields back.
+const logSpec = (value) => ({
+  ruleSpec: JSON.stringify({
+    name: 'Log a field', projectId: '10086',
+    trigger: { type: 'jira.issue.event.trigger:created' },
+    actions: [{ type: 'codebarrel.action.log', value }],
+  }),
+});
+
+test('custom fields mentioned in smart values come back with their names', async () => {
+  const result = await withForgeEnvironment(
+    async (url) => {
+      assert.ok(url.endsWith('/rest/api/3/field'), `unexpected request ${url}`);
+      return mockResponse(200, [
+        { id: 'customfield_10300', key: 'customfield_10300', name: 'Customer ITSM Incident', schema: {} },
+        { id: 'customfield_10400', key: 'customfield_10400', name: 'Not referenced', schema: {} },
+      ]);
+    },
+    () => prepareRule(logSpec('{{issue.customfield_10300}}'))
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(result.fieldNames, { customfield_10300: 'Customer ITSM Incident' });
+});
+
+test('a failed field-name lookup does not stop the draft; the ticket names the field by number', async () => {
+  const result = await withForgeEnvironment(
+    async () => mockResponse(500, {}),
+    () => prepareRule(logSpec('{{issue.customfield_10300}}'))
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(result.fieldNames, {});
+});
+
+test('a spec with no custom field makes no field lookup', async () => {
+  const calls = [];
+  const result = await withForgeEnvironment(
+    async (url) => { calls.push(url); return mockResponse(500, {}); },
+    () => prepareRule(logSpec('{{issue.key}}'))
+  );
+  assert.equal(result.ok, true, result.error);
+  assert.equal(calls.length, 0);
+});

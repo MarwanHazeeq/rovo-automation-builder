@@ -36,7 +36,11 @@ decision: `docs/adr/0001-agent-triggers-creation-of-frozen-draft.md`, terms: `CO
 - `src/drafts.js` - the two draft actions. `src/create-approved.js` - the create action,
   the only caller of `createAndVerifyRule`. `src/draft-store.js` - KVS records, the state
   machine (`nextState`) and the atomic creation claim. `src/draft-render.js` - ADF comments,
-  the redacted attachment and the rule digest. `src/jira-client.js` - Jira REST (`.asUser()`
+  the ticket description, the redacted attachment and the rule digest. `src/rule-steps.js` - the
+  rule as plain-English numbered steps (one phrase per allowed type; a contract test enforces
+  coverage, so a new type needs a phrase). `src/smart-values.js` - the fixed dictionary that
+  turns `{{...}}` smart values into plain words for those steps; unknown ones are flagged, never
+  printed raw. `src/jira-client.js` - Jira REST (`.asUser()`
   for ticket creation, `.asApp()` otherwise). `src/approval-config.js` - approval env vars.
 - `src/mark-request-ready.js` - called by `draft-automation-rule` after the attachment: labels the
   ticket `ready-for-review` (rule mode) or posts the Teams card and adds both labels (webhook

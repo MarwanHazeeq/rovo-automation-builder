@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildRulePayload, createJiraAutomationRule } from '../src/index.js';
-import { findWebResponseReads } from '../src/draft-render.js';
+import { renderDraftComment, renderDraftDescription } from '../src/draft-render.js';
 
 // Acceptance test for issue #7: the ruleSpec the agent should produce from
 // docs/specs/sdp-request-creation.md. Every secret is a placeholder string
@@ -266,48 +266,33 @@ test('verification fails when the GET has lost a trigger condition', async () =>
   assert.match(JSON.stringify(result), /Retrieved trigger conditions did not match/);
 });
 
-// Issue #13: every read is shown under the request whose response it gets.
-// The rejected branch never runs after the accepted branch's sync request, so
-// its reads belong to the SDP request, not to the request printed above them.
-test('the SDP rule\'s web-response reads all appear, with positions, under the right request', () => {
-  const { hasWebRequest, groups } = findWebResponseReads(build().rule);
-  assert.equal(hasWebRequest, true);
-  assert.deepEqual(groups, [
-    {
-      request: 'the 1st web request action',
-      reads: [{ accessor: '{{webResponse.body.access_token}}', where: ['the 3rd create variable action'] }],
-    },
-    {
-      request: 'the 2nd web request action',
-      reads: [
-        {
-          accessor: '{{webhookResponse.status}}',
-          where: [
-            'the 2nd compare condition (inside the 1st if-block)',
-            'the 3rd compare condition (inside the 1st if-block)',
-            'the 7th compare condition (inside the 3rd if-block)',
-          ],
-        },
-        {
-          accessor: '{{webhookResponse.body.request.id}}',
-          where: ['the 1st edit issue action (inside the 1st if-block)', 'the 3rd web request action (inside the 2nd if-block)'],
-        },
-        { accessor: '{{webResponse.body}}', where: ['the 2nd comment action (inside the 3rd if-block)'] },
-      ],
-    },
-    {
-      request: 'the 3rd web request action (inside the 2nd if-block)',
-      reads: [{ accessor: '{{webResponse.body}}', where: ['the 1st comment action (inside the 2nd if-block)'] }],
-    },
-  ]);
+
+// Issue #26: the approver reads the SDP rule as steps, with no internal type
+// name anywhere on the comment.
+test('the SDP rule\'s draft comment has no Jira component type names in it', () => {
+  const { rule } = build();
+  const comment = JSON.stringify(renderDraftComment(
+    { rule, version: 1, digest: 'sha256:x', scope: rule.ruleScopeARIs[0], projectName: 'SOCDemo' },
+    { attachmentName: 'draft-v1.json' }
+  ));
+  assert.doesNotMatch(comment, /jira[.]/);
+  assert.match(comment, /Otherwise, if the HTTP status returned by step 12 is greater than 399:/);
+  assert.match(comment, /14\.3\.1 /);
 });
 
-test('a read after an if/else group that sent a request says the response depends on the branch', () => {
-  const webhook = { component: 'ACTION', type: 'jira.issue.outgoing.webhook', value: { url: 'https://a.example.com' }, conditions: [], children: [] };
-  const read = { component: 'ACTION', type: 'jira.issue.comment', value: { comment: '{{webResponse.status}}' }, conditions: [], children: [] };
-  const ifBlock = { component: 'CONDITION_BLOCK', type: 'jira.condition.if.block', value: {}, conditions: [], children: [webhook] };
-  const group = { component: 'CONDITION', type: 'jira.condition.container.block', value: {}, conditions: [], children: [ifBlock] };
-  const { groups } = findWebResponseReads({ trigger: {}, components: [group, read] });
-  assert.equal(groups.at(-1).request, 'whichever request ran last in the 1st if/else group (it depends on the branch taken)');
-  assert.deepEqual(groups.at(-1).reads, [{ accessor: '{{webResponse.status}}', where: ['the 1st comment action'] }]);
+// Smart values are put into words, and each response read names the request
+// whose response it actually gets (the rejected branch never follows 14.3.1).
+test('the SDP rule\'s steps contain no smart-value code and attribute each response correctly', () => {
+  const { rule } = build();
+  const record = { rule, scope: rule.ruleScopeARIs[0], projectName: 'SOCDemo', fieldNames: { customfield_10300: 'Customer ITSM Incident' } };
+  const comment = JSON.stringify(renderDraftComment({ ...record, version: 1, digest: 'sha256:x' }, { attachmentName: 'draft-v1.json' }));
+  const description = JSON.stringify(renderDraftDescription(record));
+  for (const text of [comment, description]) {
+    assert.ok(!text.includes('{{'), 'no raw smart value');
+    assert.doesNotMatch(text, /jira[.]/);
+  }
+  assert.match(description, /if Customer ITSM Incident is empty/);
+  assert.match(description, /Set Customer ITSM Incident to the request ID from the step 12 response \(sdp-host\.invalid\)/);
+  assert.match(description, /14\.3\.3 .*the response body from step 14\.3\.1 \(sync-service\.invalid\)/);
+  assert.match(description, /15\.1 .*Response: \[the response body from step 12 \(sdp-host\.invalid\)\]/);
 });

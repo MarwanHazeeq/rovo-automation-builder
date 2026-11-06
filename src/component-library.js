@@ -582,7 +582,7 @@ const ACTION_LIBRARY = {
     source: 'rule survey: "When a low risk change management request is in review → then move request to approved" (12 rules)',
     example: { approveAction: 'Approve' },
     notes: 'This REMOVES a human approval step. Only "Approve" has been seen. Always guard it with a ' +
-      'condition that limits it to the low-risk case, and say so in requestSummary.',
+      'condition that limits it to the low-risk case, and tell the requester so.',
   },
 
   'rovo.invoke-agent.action': {
@@ -661,7 +661,7 @@ const ACTION_LIBRARY = {
     },
     notes: 'Supply operations yourself in exactly this per-operation shape (system fields by ID). ' +
       'The project operation decides WHERE the issue lands, which may be outside the rule\'s project: ' +
-      'ALWAYS ask the user which project, and name it in requestSummary. The approval ticket shows it.',
+      'ALWAYS ask the user which project. The approval ticket names it in the rule\'s steps.',
   },
 
   'jira.issue.clone': {

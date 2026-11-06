@@ -1,6 +1,7 @@
 import {
   AUTH_PLACEHOLDER, canonicalJson, describeComponentPositions, parseHttpUrl, redactSecrets, redactUrl, sha256, walkComponents,
 } from './index.js';
+import { describeIssueTarget, describeSteps, describeTrigger, issueTarget } from './rule-steps.js';
 
 /**
  * Everything a human reads about a draft is rendered HERE, by code, from the
@@ -43,42 +44,27 @@ export function projectIdFromScope(scope) {
   return /project\/(\d+)$/.exec(String(scope))?.[1] ?? null;
 }
 
-const ISSUE_CREATING_ACTIONS = new Set(['jira.issue.create', 'jira.issue.clone']);
+const ISSUE_CREATING_ACTIONS = { 'jira.issue.create': 'Create', 'jira.issue.clone': 'Clone' };
 
 /**
- * Plain-language outline of a built rule: trigger, conditions, actions, and
- * where any create/clone action puts the new issue. That last one is listed
- * on its own because it is the one action that can reach OUTSIDE the rule's
- * project scope, so the approver must see it, not dig for it in the JSON.
+ * A rule as the approver reads it: the "When ..." sentence, the numbered
+ * steps (see rule-steps.js), and where any create/clone step puts the new
+ * work item. That last one is listed on its own as well because it is the one
+ * action that can reach OUTSIDE the rule's project scope, so the approver
+ * must see it, not dig for it in the steps or the JSON.
  */
-export function summarizeRule(rule) {
-  const conditions = [];
-  const actions = [];
-  const issueTargets = [];
-  walkComponents(rule.components ?? [], (node) => {
-    if (node.component === 'CONDITION') conditions.push(node.type);
-    if (node.component === 'ACTION') actions.push(node.type);
-    if (node.component === 'ACTION' && ISSUE_CREATING_ACTIONS.has(node.type)) {
-      const projectOperation = (node.value?.operations ?? []).find((op) => op?.field?.value === 'project');
-      const target = projectOperation?.value;
-      issueTargets.push(
-        target?.type === 'ID' ? { action: node.type, projectId: String(target.value) }
-          : target?.type === 'COPY' ? { action: node.type, projectId: null, sameAsTrigger: true }
-            : { action: node.type, projectId: null }
-      );
-    }
-  });
-  return { trigger: rule.trigger?.type ?? 'none', conditions, actions, issueTargets };
-}
-
-// "project 10284 (OUTSIDE this rule's project)" etc., for the draft comment.
-function describeIssueTarget(target, scope) {
-  const scopeProjectId = /project\/(\d+)$/.exec(String(scope))?.[1];
-  if (target.sameAsTrigger) return `${target.action}: same project as the trigger issue`;
-  if (!target.projectId) return `${target.action}: project NOT SET (Jira decides; check the attached payload)`;
-  return target.projectId === scopeProjectId
-    ? `${target.action}: project ${target.projectId} (this rule's project)`
-    : `${target.action}: project ${target.projectId}, OUTSIDE this rule's project ${scopeProjectId}`;
+export function outlineRule(rule, { scope, projectName, fieldNames = {} }) {
+  const scopeProjectId = projectIdFromScope(scope);
+  const steps = describeSteps(rule, { scopeProjectId, fieldNames });
+  const issueTargets = steps
+    .filter(({ node }) => node.component === 'ACTION' && ISSUE_CREATING_ACTIONS[node.type])
+    .map(({ node, number }) =>
+      `${ISSUE_CREATING_ACTIONS[node.type]} (step ${number}) ${describeIssueTarget(issueTarget(node), scopeProjectId)}`);
+  return {
+    opening: describeTrigger(rule, projectLine(projectName, scopeProjectId), { fieldNames }),
+    steps,
+    issueTargets,
+  };
 }
 
 // Domains reserved by RFC 2606 / RFC 6761: guaranteed never to resolve, so a
@@ -117,9 +103,12 @@ function walkRule(rule, visit) {
  *
  * Only the stand-in itself is shown (the placeholder token, or the redacted
  * URL), never the whole value it sits in, which may hold a real secret.
+ *
+ * `positions` maps each component to where a reader finds it. The draft
+ * comment passes step numbers (see stepPositions) so the list points at the
+ * steps printed above it.
  */
-export function findStandIns(rule) {
-  const positions = describeComponentPositions(rule);
+export function findStandIns(rule, positions = describeComponentPositions(rule)) {
   const found = [];
   walkRule(rule, (node) => {
     const where = positions.get(node) ?? 'the rule';
@@ -139,95 +128,6 @@ export function findStandIns(rule) {
   return found;
 }
 
-// A smart value that reads a web request's response, e.g.
-// "{{webResponse.body.access_token}}" or "{{webhookResponse.status}}".
-const WEB_RESPONSE_READ = /\{\{\s*(?:webResponse|webhookResponse)\b[^}]*\}\}/g;
-
-/**
- * Every web-response read in a rule, grouped under the web request whose
- * response it actually gets: the most recent request before it that has run
- * (a later request overwrites the response).
- *
- * "Has run" is why this is not a plain rule-order walk. The branches of an
- * if/else group are exclusive, so a request in the accepted branch never
- * precedes a read in the rejected branch even though it is above it on the
- * page. Each branch therefore starts from the response the group was entered
- * with. After a group (or a lone if-block) in which a request was sent, which
- * response is live depends on the branch taken, and the group heading says so.
- *
- * The app cannot tell whether an accessor is right; the spec it would be
- * checked against never reaches the app. This makes the actual strings
- * visible so an approver who knows the rule can catch a wrong one.
- *
- * Returns { hasWebRequest, groups: [{ request, reads: [{ accessor, where: [] }] }] }.
- * `request` is null for reads before any request. Identical accessors in one
- * group are merged into one entry listing all their positions, so a long rule
- * stays short. A request's OWN value (e.g. its body) is read before it is sent,
- * so those reads count toward the previous request.
- */
-export function findWebResponseReads(rule) {
-  const positions = describeComponentPositions(rule);
-  // `sent` marks a real request group, which is shown even with no reads (an
-  // unread response is worth seeing too). The other groups show only if read.
-  const startGroup = (request, sent) => {
-    const group = { request, sent, reads: new Map() };
-    groups.push(group);
-    return group;
-  };
-  const groups = [];
-  let current = startGroup(null, false);
-
-  // Returns whether any request was sent within `nodes`.
-  const visit = (nodes) => {
-    let sentAny = false;
-    for (const node of Array.isArray(nodes) ? nodes : []) {
-      if (!node || typeof node !== 'object') continue;
-      const where = positions.get(node) ?? 'the rule';
-      for (const leaf of stringLeaves(node.value)) {
-        for (const accessor of leaf.match(WEB_RESPONSE_READ) ?? []) {
-          const places = current.reads.get(accessor) ?? [];
-          if (!places.includes(where)) places.push(where);
-          current.reads.set(accessor, places);
-        }
-      }
-      if (node.component === 'ACTION' && node.type === 'jira.issue.outgoing.webhook') {
-        current = startGroup(where, true);
-        sentAny = true;
-      }
-
-      const entry = current;
-      let sentInside = false;
-      if (node.type === 'jira.condition.container.block') {
-        for (const branch of Array.isArray(node.children) ? node.children : []) {
-          current = entry;
-          if (visit([branch])) sentInside = true;
-        }
-      } else {
-        // Both walks must run, so no short-circuiting `||` here.
-        const inConditions = visit(node.conditions);
-        const inChildren = visit(node.children);
-        sentInside = inConditions || inChildren;
-      }
-      if (node.type === 'jira.condition.container.block' || node.type === 'jira.condition.if.block') {
-        current = sentInside
-          ? startGroup(`whichever request ran last in ${where} (it depends on the branch taken)`, false)
-          : entry;
-      }
-      sentAny = sentAny || sentInside;
-    }
-    return sentAny;
-  };
-  if (rule.trigger && typeof rule.trigger === 'object') visit([rule.trigger]);
-  visit(rule.components);
-
-  return {
-    hasWebRequest: groups.some((group) => group.sent),
-    groups: groups
-      .filter((group) => group.sent || group.reads.size > 0)
-      .map(({ request, reads }) => ({ request, reads: [...reads].map(([accessor, where]) => ({ accessor, where })) })),
-  };
-}
-
 // --- ADF node helpers -------------------------------------------------------
 
 const text = (value, marks) => ({ type: 'text', text: String(value), ...(marks ? { marks } : {}) });
@@ -241,7 +141,71 @@ const bulletList = (items) => ({
 });
 const doc = (...content) => ({ type: 'doc', version: 1, content });
 
-const listOrNone = (items) => (items.length ? items.join(', ') : 'none');
+
+/**
+ * Numbered steps as nested bullet lists. The step number is written into the
+ * text ("2.1 ...") rather than left to an ordered list, because Jira picks
+ * its own numbering style for nested ordered lists and the stand-in list
+ * refers to steps by these exact numbers.
+ */
+function stepList(steps, depth = 0, start = 0) {
+  const items = [];
+  let i = start;
+  while (i < steps.length && steps[i].depth >= depth) {
+    const step = steps[i];
+    i += 1;
+    const content = [paragraph(strong(`${step.number} `), text(step.text))];
+    if (i < steps.length && steps[i].depth > depth) {
+      const nested = stepList(steps, depth + 1, i);
+      content.push(nested.list);
+      i = nested.next;
+    }
+    items.push({ type: 'listItem', content });
+  }
+  return { list: { type: 'bulletList', content: items }, next: i };
+}
+
+/** The "When ..." sentence and the steps, shared by the comment and the description. */
+function ruleBody(outline) {
+  return [
+    paragraph(text(outline.opening)),
+    ...(outline.steps.length ? [stepList(outline.steps).list] : [paragraph(text('(The rule has no steps.)'))]),
+  ];
+}
+
+/**
+ * Where each component sits, by step number: "step 2.1". A branch's own
+ * conditions belong to its "If ..." step; trigger conditions to the trigger.
+ */
+function stepPositions(rule, steps) {
+  const positions = new Map();
+  if (rule?.trigger && typeof rule.trigger === 'object') positions.set(rule.trigger, 'the trigger');
+  walkComponents(rule?.trigger?.conditions, (node) => positions.set(node, 'the trigger'));
+  for (const { number, node } of steps) {
+    positions.set(node, `step ${number}`);
+    walkComponents(node.conditions, (inner) => positions.set(inner, `step ${number}`));
+  }
+  return positions;
+}
+
+/**
+ * The approval ticket description: what the draft rule does, in the same
+ * words and numbered steps as the "Draft vN" comment (issue #25).
+ *
+ * The target project comes first: it is the one thing the app cannot check
+ * against the conversation, so the manager is the last point where a wrong
+ * project is free to fix. Nothing here is text the agent or the requester
+ * wrote; it is all rendered from the draft. It is written when the ticket is
+ * raised and rewritten on every revision, so it always shows the latest draft.
+ */
+export function renderDraftDescription({ rule, scope, projectName, fieldNames }) {
+  return doc(
+    paragraph(strong('Target project: '), text(projectLine(projectName, projectIdFromScope(scope)))),
+    ...ruleBody(outlineRule(rule, { scope, projectName, fieldNames })),
+    paragraph(text('Written by the Automation Rule Builder app from the stored draft. The authoritative draft is the latest ' +
+      '"Draft vN" comment and its attached JSON.'))
+  );
+}
 
 /**
  * The redacted copy of a draft that is attached to the approval ticket, so the
@@ -276,8 +240,8 @@ export function renderDraftAttachment(record) {
  * case the comment says so (the summary alone is enough to decide on).
  */
 export function renderDraftComment(record, { attachmentName, attachmentError } = {}) {
-  const { rule, version, digest, scope, projectName } = record;
-  const outline = summarizeRule(rule);
+  const { rule, version, digest, scope, projectName, fieldNames } = record;
+  const outline = outlineRule(rule, { scope, projectName, fieldNames });
 
   const attachmentLine = attachmentName
     ? paragraph(strong('Full payload: '), code(attachmentName),
@@ -293,39 +257,18 @@ export function renderDraftComment(record, { attachmentName, attachmentError } =
       [strong('Name: '), text(rule.name)],
       [strong('Project: '), text(projectLine(projectName, projectIdFromScope(scope)))],
       [strong('Project scope: '), code(scope)],
-      [strong('Trigger: '), code(outline.trigger)],
-      [strong('Conditions: '), text(listOrNone(outline.conditions))],
-      [strong('Actions: '), text(listOrNone(outline.actions))],
       ...(outline.issueTargets.length
-        ? [[strong('Creates issues in: '), text(outline.issueTargets.map((t) => describeIssueTarget(t, scope)).join('; '))]]
+        ? [[strong('Creates work items: '), text(outline.issueTargets.join('; '))]]
         : []),
       [strong('State on creation: '), text('DISABLED (a human enables it)')],
       [strong('Digest: '), code(digest)],
     ]),
-    ...renderWebResponseReads(findWebResponseReads(rule)),
-    ...renderStandIns(findStandIns(rule)),
+    heading(4, 'What the rule does'),
+    ...ruleBody(outline),
+    ...renderStandIns(findStandIns(rule, stepPositions(rule, outline.steps))),
     attachmentLine,
     paragraph(text('Any member of the approver group can review this. Approve to have the agent create exactly this rule. Request Changes to have it revised. Reject to cancel.'))
   );
-}
-
-// Shown on EVERY draft with a web request, not only when something looks wrong:
-// the app cannot know what is wrong, and a section that appears only sometimes
-// trains people to skim it. Accessors are code-marked text: data, not markup.
-function renderWebResponseReads({ hasWebRequest, groups }) {
-  if (!hasWebRequest) return [];
-  return [
-    heading(4, 'Web response reads'),
-    paragraph(text('Each read gets the response of the web request it is listed under; a later request ' +
-      'overwrites it. Check every accessor is exactly the one this rule needs (webResponse and ' +
-      'webhookResponse are not interchangeable).')),
-    ...groups.flatMap(({ request, reads }) => [
-      paragraph(strong(request ? `After ${request}:` : 'Before any web request:')),
-      reads.length
-        ? bulletList(reads.map(({ accessor, where }) => [code(accessor), text(` in ${where.join('; ')}`)]))
-        : paragraph(text('No reads of this response.')),
-    ]),
-  ];
 }
 
 // The section's presence is the signal, so it is left out entirely when there
